@@ -233,7 +233,7 @@ def apply_round_num(df: pl.DataFrame, rounds_df: pl.DataFrame, tick_col: str = "
     # Validate that the event tick is within the round boundaries.
     # If the tick is greater than the round's 'end', then set round_num to null.
     df_with_round = df_with_round.with_columns(
-        pl.when(pl.col(tick_col) < pl.col("official_end")).then(pl.col("round_num")).otherwise(None).alias("round_num")
+        pl.when(pl.col(tick_col) <= pl.col("official_end")).then(pl.col("round_num")).otherwise(None).alias("round_num")
     )
 
     return df_with_round.drop(["start", "official_end"])
