@@ -1,6 +1,6 @@
 [project]
 name = "awpy"
-version = "2.0.0"
+version = "2.0.2"
 description = "Counter-Strike 2 demo parsing, analysis and visualization"
 readme = "README.md"
 authors = [
@@ -21,12 +21,11 @@ classifiers = [
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "click>=8.1.8",
-    "demoparser2>=0.36.0",
+    "demoparser2>=0.38.0",
     "loguru>=0.7.3",
     "matplotlib>=3.10.0",
     "networkx>=3.4.2",
-    "numpy>=2.2.1",
-    "pandas>=2.2.3",
+    "numpy>=2.0.0",
     "pillow>=11.1.0",
     "polars>=1.22.0",
     "requests>=2.32.3",
@@ -49,13 +48,13 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "mypy>=1.15.0",
-    "pre-commit>=4.1.0",
-    "ruff>=0.9.6",
+    "pre-commit>=4.2.0",
+    "ruff>=0.11.2",
     "vdf>=3.4",
 ]
 test = [
-    "coverage>=7.6.12",
-    "pytest>=8.3.4",
+    "coverage>=7.7.1",
+    "pytest>=8.3.5",
 ]
 docs = [
     "ipykernel>=6.29.5",
