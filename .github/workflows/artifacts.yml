@@ -115,42 +115,32 @@ jobs:
         run: |
           echo "Uploading artifacts for patch $LATEST_PATCH_ID"
 
-      - name: Push changes to GitHub
+      - name: Push changes and create pull request
         if: steps.update_patch.outputs.wasPatchUpdated == 'true'
-        shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Determine target branch: for pull request events use the PR branch, otherwise default to "main"
-          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
-            $targetBranch = $env:GITHUB_HEAD_REF
-          }
-          else {
-            $targetBranch = "main"
-          }
-
           # Stash any unstaged changes (e.g., due to LF/CRLF differences)
           git stash --include-untracked
-
-          # Check out the target branch (creating or resetting it as needed)
-          git checkout -B $targetBranch
-
-          # Pull the latest remote changes and rebase local commits
-          git pull origin $targetBranch --rebase
-
-          # Restore any stashed changes (if present)
+          # Create and switch to a new branch named artifacts/${{ env.LATEST_PATCH_ID }}
+          git checkout -B artifacts/${{ env.LATEST_PATCH_ID }}
+          # Pull the latest changes from main to rebase local commits
+          git pull origin main --rebase
+          # Restore any stashed changes
           git stash pop || true
-
-          # Stage and commit your changes
+          # Stage and commit changes
           uv run ruff format .
           git add awpy/data/__init__.py
-          git commit -m "Update data with latest patch info ($env:LATEST_PATCH_ID)"
-          
-          if ($LASTEXITCODE -eq 0) {
-            # Push changes and set upstream if necessary
-            git push --set-upstream origin $targetBranch
-          }
-          else {
-            Write-Host "No changes detected; skipping push."
-          }
+          git commit -m "Update data with latest patch info (${{ env.LATEST_PATCH_ID }})"
+          # Push the new branch
+          git push --set-upstream origin artifacts/${{ env.LATEST_PATCH_ID }}
+
+      - name: Create Pull Request
+        if: steps.update_patch.outputs.wasPatchUpdated == 'true'
+        uses: peter-evans/create-pull-request@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: artifacts/${{ env.LATEST_PATCH_ID }}
+          base: main
+          title: "artifacts/${{ env.LATEST_PATCH_ID }}"
+          body: "This PR updates the artifacts for patch ${{ env.LATEST_PATCH_ID }}."
