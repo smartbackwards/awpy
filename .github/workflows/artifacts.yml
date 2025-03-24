@@ -116,14 +116,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Stash any unstaged changes (e.g., due to LF/CRLF differences)
-          git stash --include-untracked
           # Create and switch to a new branch named artifacts/${{ env.LATEST_PATCH_ID }}
           git checkout -B artifacts/${{ env.LATEST_PATCH_ID }}
           # Pull the latest changes from main to rebase local commits
           git pull origin main --rebase
-          # Restore any stashed changes
-          git stash pop || true
           # Stage and commit changes
           uv run ruff format .
           git add awpy/data/__init__.py
