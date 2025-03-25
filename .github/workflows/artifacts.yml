@@ -116,14 +116,17 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Create and switch to a new branch
           git checkout -B artifacts/${{ env.LATEST_PATCH_ID }}
-          git pull origin main --rebase
-          # Unstage any changes so only our targeted file is added
-          git reset
-          uv run ruff format .
-          # Add only the desired file
+          # Fetch main and reset the working directory to match main so that only desired changes remain
+          git fetch origin main
+          git reset --hard origin/main
+          # (Optional) Run formatting only on __init__.py if needed:
+          uv run ruff format awpy/data/__init__.py
+          # Stage and commit only the file you want to update
           git add awpy/data/__init__.py
           git commit -m "Update data with latest patch info (${{ env.LATEST_PATCH_ID }})"
+          # Push the new branch
           git push --set-upstream origin artifacts/${{ env.LATEST_PATCH_ID }}
 
       - name: Open Pull Request
