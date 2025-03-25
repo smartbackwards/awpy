@@ -116,18 +116,17 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Create and switch to a new branch named artifacts/${{ env.LATEST_PATCH_ID }}
           git checkout -B artifacts/${{ env.LATEST_PATCH_ID }}
-          # Pull the latest changes from main to rebase local commits
           git pull origin main --rebase
-          # Stage and commit changes
+          # Unstage any changes so only our targeted file is added
+          git reset
           uv run ruff format .
+          # Add only the desired file
           git add awpy/data/__init__.py
           git commit -m "Update data with latest patch info (${{ env.LATEST_PATCH_ID }})"
-          # Push the new branch
           git push --set-upstream origin artifacts/${{ env.LATEST_PATCH_ID }}
 
-      - name: Create Pull Request
+      - name: Open Pull Request
         if: steps.update_patch.outputs.wasPatchUpdated == 'true'
         uses: peter-evans/create-pull-request@v4
         with:
