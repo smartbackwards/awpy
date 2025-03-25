@@ -72,6 +72,12 @@ jobs:
           Invoke-WebRequest -Uri $env:SOURCE2_VIEWER_URL -OutFile ".\cli-windows-x64.zip"
           Expand-Archive -Path .\cli-windows-x64.zip -DestinationPath . -Force
 
+      - name: Update data module to latest patch
+        if: steps.update_patch.outputs.wasPatchUpdated == 'true'
+        run: |
+          Get-ChildItem -Force
+          .\scripts\update-latest-patch.ps1
+
       - name: Generate Triangles
         if: steps.update_patch.outputs.wasPatchUpdated == 'true'
         run: |
@@ -121,7 +127,7 @@ jobs:
           # Fetch main and reset the working directory to match main so that only desired changes remain
           git fetch origin main
           git reset --hard origin/main
-          # (Optional) Run formatting only on __init__.py if needed:
+          # Run formatting only on awpy/data/__init__.py:
           uv run ruff format awpy/data/__init__.py
           # Stage and commit only the file you want to update
           git add awpy/data/__init__.py
