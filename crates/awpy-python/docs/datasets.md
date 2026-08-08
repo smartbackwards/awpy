@@ -27,6 +27,8 @@ over" broadcast.
 | `reason` | i32 | Raw round-end reason code (`RoundEndReason_t`). |
 | `reason_name` | str | Human-readable reason (e.g. `bomb_defused`, `ct_win`). |
 | `is_knife_round` | bool | Whether this is a knife round — a side-decider round where every kill is a melee (knife) kill, with no firearm or grenade kills. Excluded from `stats` by default. |
+| `freeze_ticks` | i32? | This round's freeze period length (`freeze_end_tick - start_tick`), when both are known. |
+| `extended_freeze` | bool | This round's freeze period ran unusually long relative to the demo's own baseline — a corroborating, field-name-agnostic signal that a pause happened during it. Cross-reference against [`timeouts`](#timeouts), which detects pauses directly from game-rules state. |
 
 ```python
 # Final score by side
@@ -125,11 +127,12 @@ demo.bomb
 
 Bomb actions with the acting player and their position. Columns: `tick`,
 `event` (one of `pickup`, `drop`, `start_plant`, `interrupt_plant`,
-`finish_plant`, `defuse`), `steamid`, `name`, `bombsite` (`A` / `B`, from the
-planted C4; null before the plant), `x`, `y`, `z`.
+`finish_plant`, `defuse`, `start_defuse`, `explode`), `steamid`, `name`,
+`bombsite` (`A` / `B`, from the planted C4; null before the plant), `x`, `y`, `z`.
 
 Some demos don't emit the begin/abort-plant events, so `start_plant` /
-`interrupt_plant` rows may be absent.
+`interrupt_plant` rows may be absent. Likewise `start_defuse` / `explode` are
+only present in rounds where the bomb was actually defused or exploded.
 
 ## `grenades`
 
@@ -141,6 +144,38 @@ Thrown-grenade **trajectories** — one row per tick each grenade projectile is 
 flight (samples stop once it settles). Columns: `tick`, `thrower_name`,
 `thrower_steamid`, `thrower_side`, `type` (`smoke` / `he` / `flashbang` /
 `molotov` / `decoy`), `entity_id`, `x`, `y`, `z`.
+
+See also [`grenade_throws`](#grenade_throws), a one-row-per-throw summary of
+this same data.
+
+## `grenade_throws`
+
+```python
+demo.grenade_throws
+```
+
+Thrown grenades **summarized to one row each** — the throw and the land,
+rather than every tracked tick (every `entity_id` here also appears in
+[`grenades`](#grenades)). Columns: `thrower_name`, `thrower_steamid`,
+`thrower_side`, `type` (`smoke` / `he` / `flashbang` / `molotov` / `decoy`),
+`entity_id`, `throw_tick`, `throw_x`, `throw_y`, `throw_z`, `land_tick`,
+`land_x`, `land_y`, `land_z`, `land_is_precise`.
+
+`throw_*` is the projectile's first tracked position — the moment it exists in
+the world as its own entity (the release point of the throw, not the
+`weapon_fire` event, which fires earlier when the throw begins — use
+`demo.shots` for that moment instead). `land_*` is its last tracked position —
+where it settled / detonated — **except for HE grenades**, where it is
+refined to the position of the correlated `hegrenade_detonate` event
+(matched by entity id, so it's exact) rather than the last tick the entity
+happened to be sampled; `land_is_precise` is `true` exactly when that
+refinement applied.
+
+```python
+# Flashbangs thrown, with their landing spot
+import polars as pl
+demo.grenade_throws.filter(pl.col("type") == "flashbang")
+```
 
 ## `fires` / `smokes`
 
@@ -202,10 +237,14 @@ each get a Steam id, name, side, and world position, plus a `duration`.
 | `attacker_steamid` / `_name` / `_side` / `_x` / `_y` / `_z` | | The flash's thrower. |
 | `victim_steamid` / `_name` / `_side` / `_x` / `_y` / `_z` | | The blinded player. |
 | `duration` | f32 | Blind duration in seconds. |
+| `is_teammate` | bool | `true` when attacker and victim resolved to the same known side — a team-flash. A conservative check: an unresolved side never counts as a team-flash. |
 
 The attacker may be a teammate (a team-flash) or the victim themselves (a
-self-flash), so filter on `attacker_side` / `victim_side` or compare Steam ids
-as needed.
+self-flash), so filter on `is_teammate` (or compare Steam ids for a self-flash
+specifically) as needed.
+
+`demo.flashes` is an alias for this exact dataset — same columns, same cached
+DataFrame — use whichever name reads better.
 
 CS2 **GOTV demos usually omit the `player_blind` game event** (as they omit chat
 and round events), so awpy reconstructs blinds from entity state instead — a
@@ -217,9 +256,7 @@ returned if it doesn't).
 ```python
 # Enemy flashes only, longest first
 import polars as pl
-demo.blinds.filter(pl.col("attacker_side") != pl.col("victim_side")).sort(
-    "duration", descending=True
-)
+demo.blinds.filter(~pl.col("is_teammate")).sort("duration", descending=True)
 ```
 
 ## `item_events`
@@ -269,6 +306,42 @@ demo.item_events.filter(
 demo.item_events.filter(
     (pl.col("action") == "pickup")
     & (pl.col("original_owner_steamid") != pl.col("steamid"))
+)
+```
+
+## `timeouts`
+
+```python
+demo.timeouts
+```
+
+Technical and tactical timeouts, reconstructed from `CCSGameRules` state —
+the same entity-transition approach as [`rounds`](#rounds), independent of it.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `side` | str? | `terrorist` / `counter-terrorist` for a tactical timeout; null for a technical (admin) pause, which isn't team-specific. |
+| `type` | str | `tactical` (a team-called timeout) or `technical` (an admin pause). |
+| `start_tick` | i32 | Tick the timeout began. |
+| `end_tick` | i32? | Tick it ended; null if still active when the demo ends. |
+| `remaining_at_start` | f32? | The countdown value at the timeout's start — its nominal length in seconds. Null for technical (no countdown is networked for a game pause). |
+| `round_num` | i32 | The round in progress when the timeout started. |
+
+Tactical timeouts (`m_bTerroristTimeOutActive` / `m_bCTTimeOutActive`) are
+confirmed present and reliable on real GOTV demos — CS2's 30-second
+team-called timeouts show up cleanly as boolean edges, unlike most
+`CCSGameRules` state, which competitive demos often strip. Technical timeouts
+(`m_bGamePaused`) resolve the same way but are rarer in practice; if one
+doesn't show up here, cross-check [`rounds`](#rounds)' `extended_freeze`
+column — a corroborating, field-name-agnostic signal — or scan chat for an
+explicit `.tac` / `.tech` call with `awpy.find_timeout_calls` (only useful on
+demos where chat survives; GOTV/broadcast demos usually strip it entirely).
+
+```python
+# Cross-check: every extended-freeze round has a matching timeout
+import polars as pl
+demo.rounds.filter(pl.col("extended_freeze")).join(
+    demo.timeouts, on="round_num", how="left"
 )
 ```
 

@@ -22,10 +22,12 @@ all of them accept `--json` for machine-readable output.
 | `rounds` | Per-round table (start / freeze-end / end / official-end, winner, reason). |
 | `kills` | Kills from `player_death`, with players resolved. |
 | `damage` | Damage from `player_hurt`, with players + health pre/post. |
-| `bomb` | Bomb actions (pickup / drop / plant / defuse) with site. |
+| `bomb` | Bomb actions (pickup / drop / plant / defuse-start / defuse / explode) with site. |
 | `shots` | Shots from `weapon_fire` with shooter + weapon state. |
 | `grenades` / `fires` / `smokes` | Grenade / inferno / smoke summaries. |
+| `grenade-throws` | One row per thrown grenade: throw and land tick/position. |
 | `blinds` | Flash events: who was blinded, by whom, and for how long. |
+| `timeouts` | Technical and tactical timeouts. |
 | `item-events` | Weapon-item transactions: purchases, pickups, and drops. |
 | `stats` | Per-player scoreboard (kills, KAST, ADR, openings, trades). |
 

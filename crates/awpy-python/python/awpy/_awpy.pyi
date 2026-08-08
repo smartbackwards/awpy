@@ -237,8 +237,13 @@ class Demo:
         works even on GOTV demos, which omit the ``player_blind`` event).
         Columns: ``tick``, the resolved ``attacker_*`` (thrower) and
         ``victim_*`` (blinded player) ``steamid`` / ``name`` / ``side`` /
-        ``x`` / ``y`` / ``z``, and ``duration`` (blind seconds).
+        ``x`` / ``y`` / ``z``, ``duration`` (blind seconds), and
+        ``is_teammate`` (``true`` for a team-flash). See also :attr:`flashes`.
         """
+
+    @property
+    def flashes(self) -> pl.DataFrame:
+        """Alias for :attr:`blinds` — same data, the more intuitive name."""
 
     @property
     def item_events(self) -> pl.DataFrame:
@@ -248,6 +253,20 @@ class Demo:
         (``purchase`` / ``pickup`` / ``drop``), ``steamid`` / ``name`` /
         ``side``, ``item``, ``x`` / ``y`` / ``z``, ``original_owner_steamid``,
         ``cost`` (purchases), and ``near_buy_zone`` (drops).
+        """
+
+    @property
+    def timeouts(self) -> pl.DataFrame:
+        """Technical and tactical timeouts as a DataFrame (cached).
+
+        Reconstructed from ``CCSGameRules`` state, independent of
+        :attr:`rounds`. Columns: ``side`` (``"terrorist"`` /
+        ``"counter-terrorist"`` / ``None`` for technical), ``type``
+        (``"tactical"`` / ``"technical"``), ``start_tick``, ``end_tick``
+        (``None`` if still active when the demo ends), ``remaining_at_start``
+        (nominal length in seconds; ``None`` for technical), and
+        ``round_num``. Cross-check against :attr:`rounds`' ``extended_freeze``
+        column.
         """
 
     @property
@@ -264,9 +283,13 @@ class Demo:
 
         One row per round with ``round_num``, ``start_tick``,
         ``freeze_end_tick``, ``end_tick``, ``winner`` (team number),
-        ``winner_side``, ``reason``, and ``reason_name``. Reconstructed from
-        ``CCSGameRules`` state, so it works on demos without ``round_start`` /
-        ``round_end`` events.
+        ``winner_side``, ``reason``, ``reason_name``, ``is_knife_round``,
+        ``freeze_ticks`` (freeze period length), and ``extended_freeze``
+        (``true`` when this round's freeze period ran unusually long relative
+        to the demo's own baseline — a corroborating signal that a pause
+        happened during it; cross-reference against :attr:`timeouts`).
+        Reconstructed from ``CCSGameRules`` state, so it works on demos
+        without ``round_start`` / ``round_end`` events.
         """
 
     @property
@@ -300,11 +323,22 @@ class Demo:
 
     @property
     def bomb(self) -> pl.DataFrame:
-        """Bomb actions (pickup / drop / plant / defuse) as a DataFrame (cached)."""
+        """Bomb actions (pickup / drop / plant / defuse-start / defuse / explode)
+        as a DataFrame (cached).
+        """
 
     @property
     def grenades(self) -> pl.DataFrame:
-        """Thrown-grenade trajectories (one row per tick each grenade is live; cached)."""
+        """Thrown-grenade trajectories (one row per tick each grenade is live; cached).
+
+        See also :attr:`grenade_throws`, a one-row-per-throw summary.
+        """
+
+    @property
+    def grenade_throws(self) -> pl.DataFrame:
+        """Thrown grenades summarized to one row each (cached): throw and land
+        tick/position. See :attr:`grenades` for the full per-tick trajectory.
+        """
 
     @property
     def fires(self) -> pl.DataFrame:

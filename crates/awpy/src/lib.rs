@@ -75,8 +75,8 @@ pub mod weapons;
 
 // Re-export commonly used types at the crate root for convenience
 pub use datasets::{
-    Blind, BombEvent, ChatMessage, Damage, Fire, Grenade, ItemEvent, Kill, Player, PlayerState,
-    Round, RoundEconomy, Shot, Smoke,
+    Blind, BombEvent, ChatMessage, Damage, Fire, Grenade, GrenadeThrow, ItemEvent, Kill, Player,
+    PlayerState, Round, RoundEconomy, Shot, Smoke, Timeout,
 };
 pub use demo::{
     CmdHeader, Context, GameEvent, MessageInfo, Parser, command_name, decode_event_payload,

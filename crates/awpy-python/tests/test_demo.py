@@ -311,9 +311,11 @@ def test_blinds(demo_path: Path) -> None:
         "victim_y",
         "victim_z",
         "duration",
+        "is_teammate",
     }
     assert expected <= set(blinds.columns)
     assert blinds["duration"].dtype == pl.Float32
+    assert blinds["is_teammate"].dtype == pl.Boolean
     # Demos without flashbang_detonate (rare) yield an empty frame; the fixture
     # is a real match, so it has flashes.
     if blinds.height:
@@ -325,6 +327,12 @@ def test_blinds(demo_path: Path) -> None:
         assert blinds["victim_x"].null_count() == 0
         # Rows are in tick order.
         assert blinds["tick"].to_list() == sorted(blinds["tick"].to_list())
+        # A self-flash (attacker == victim) is always a team-flash.
+        self_flash = blinds.filter(pl.col("attacker_steamid") == pl.col("victim_steamid"))
+        if self_flash.height:
+            assert self_flash["is_teammate"].all()
+        # demo.flashes is a literal alias for demo.blinds.
+        assert Demo(demo_path).flashes.equals(blinds)
 
 
 def test_item_events(demo_path: Path) -> None:
@@ -397,6 +405,8 @@ def test_rounds(demo_path: Path) -> None:
         "winner",
         "winner_side",
         "reason_name",
+        "freeze_ticks",
+        "extended_freeze",
     } <= set(rounds.columns)
     assert rounds.height > 0
     # Winners are terrorist / counter-terrorist.
@@ -404,6 +414,36 @@ def test_rounds(demo_path: Path) -> None:
     # End ticks are strictly increasing across rounds.
     end = rounds["end_tick"].to_list()
     assert end == sorted(end)
+    # freeze_ticks, where known, is a positive span.
+    known = rounds.filter(pl.col("freeze_ticks").is_not_null())
+    if known.height:
+        assert (known["freeze_ticks"] > 0).all()
+
+
+def test_timeouts(demo_path: Path) -> None:
+    demo = Demo(demo_path)
+    timeouts = demo.timeouts
+    assert isinstance(timeouts, pl.DataFrame)
+    assert {
+        "side",
+        "type",
+        "start_tick",
+        "end_tick",
+        "remaining_at_start",
+        "round_num",
+    } <= set(timeouts.columns)
+    assert set(timeouts["type"].unique()) <= {"tactical", "technical"}
+    if timeouts.height:
+        tactical = timeouts.filter(pl.col("type") == "tactical")
+        assert set(tactical["side"].unique()) <= {"terrorist", "counter-terrorist"}
+        # Every closed timeout ends at or after it starts.
+        closed = timeouts.filter(pl.col("end_tick").is_not_null())
+        if closed.height:
+            assert (closed["end_tick"] >= closed["start_tick"]).all()
+        # Cross-check: every tactical timeout lands inside a round flagged
+        # extended_freeze (the two detection mechanisms should agree).
+        extended = set(demo.rounds.filter(pl.col("extended_freeze"))["round_num"].to_list())
+        assert set(tactical["round_num"].to_list()) <= extended
 
 
 def test_kills(demo_path: Path) -> None:
@@ -484,6 +524,8 @@ def test_bomb(demo_path: Path) -> None:
         "interrupt_plant",
         "finish_plant",
         "defuse",
+        "start_defuse",
+        "explode",
     }
 
 
@@ -496,6 +538,47 @@ def test_grenades(demo_path: Path) -> None:
     # projectile pass against dropping the class's second role.
     assert g.filter(pl.col("type") == "smoke").height > 0
     assert set(g["type"].unique()) <= {"smoke", "he", "flashbang", "molotov", "decoy", "grenade"}
+
+
+def test_grenade_throws(demo_path: Path) -> None:
+    demo = Demo(demo_path)
+    throws = demo.grenade_throws
+    assert isinstance(throws, pl.DataFrame)
+    assert {
+        "thrower_name",
+        "thrower_steamid",
+        "thrower_side",
+        "type",
+        "entity_id",
+        "throw_tick",
+        "throw_x",
+        "throw_y",
+        "throw_z",
+        "land_tick",
+        "land_x",
+        "land_y",
+        "land_z",
+        "land_is_precise",
+    } <= set(throws.columns)
+    assert throws.height > 0
+    # One row per throw, and every throw's land is at or after its own throw.
+    assert (throws["land_tick"] >= throws["throw_tick"]).all()
+    # Every entity_id in grenade_throws also appears in the full trajectory,
+    # scoped to that throw's own tick window (entity ids can be reused later
+    # in the match by an unrelated throw, so a plain entity_id join is wrong).
+    traj = demo.grenades
+    for row in throws.head(20).iter_rows(named=True):
+        window = traj.filter(
+            (pl.col("entity_id") == row["entity_id"])
+            & (pl.col("tick") >= row["throw_tick"])
+            & (pl.col("tick") <= row["land_tick"])
+        )
+        assert window.height > 0
+        assert window["tick"].min() == row["throw_tick"]
+        assert window["tick"].max() == row["land_tick"]
+    # HE landings that were refined report it via land_is_precise; every other
+    # type is always trajectory-derived (never "precise").
+    assert not throws.filter(pl.col("type") != "he")["land_is_precise"].any()
 
 
 def test_fires_and_smokes(demo_path: Path) -> None:

@@ -22,8 +22,8 @@ use awpy::map_control::{
 use awpy::nav::{Nav, PathWeight};
 use awpy::{
     Blind, BombEvent, ChatMessage, Context, Damage, Entity, FieldValue, Fire, GameEvent, Grenade,
-    ItemEvent, Kill, Parser, Player, PlayerState, PlayerStats, Round, RoundEconomy, Serializer,
-    Shot, Smoke, cell_to_world,
+    GrenadeThrow, ItemEvent, Kill, Parser, Player, PlayerState, PlayerStats, Round, RoundEconomy,
+    Serializer, Shot, Smoke, Timeout, cell_to_world,
 };
 
 pyo3::create_exception!(_awpy, InvalidDemoError, pyo3::exceptions::PyException);
@@ -334,9 +334,13 @@ impl Demo {
     /// Per-round information as a DataFrame (cached).
     ///
     /// One row per round with ``round_num``, ``start_tick``, ``freeze_end_tick``,
-    /// ``end_tick``, ``winner`` (team number), ``winner_side``, ``reason``, and
-    /// ``reason_name``. Reconstructed from ``CCSGameRules`` state, so it works on
-    /// demos without ``round_start`` / ``round_end`` events.
+    /// ``end_tick``, ``winner`` (team number), ``winner_side``, ``reason``,
+    /// ``reason_name``, ``is_knife_round``, ``freeze_ticks`` (freeze period
+    /// length), and ``extended_freeze`` (``true`` when this round's freeze
+    /// period ran unusually long relative to the demo's own baseline — a
+    /// corroborating signal that a pause happened during it; cross-reference
+    /// against :attr:`timeouts`). Reconstructed from ``CCSGameRules`` state,
+    /// so it works on demos without ``round_start`` / ``round_end`` events.
     #[getter]
     fn rounds(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let rounds = self.parsed_rounds(py)?;
@@ -370,16 +374,32 @@ impl Demo {
         self.event_frame(py, "damages")
     }
 
-    /// Bomb actions (pickup / drop / plant / defuse) as a DataFrame (cached).
+    /// Bomb actions (pickup / drop / plant / defuse-start / defuse / explode)
+    /// as a DataFrame (cached).
     #[getter]
     fn bomb(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.event_frame(py, "bomb")
     }
 
     /// Thrown-grenade trajectories (one row per tick each grenade is live; cached).
+    ///
+    /// See also :attr:`grenade_throws`, a one-row-per-throw summary of this
+    /// same data (throw and land tick/position only).
     #[getter]
     fn grenades(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.projectile_frame(py, "grenades")
+    }
+
+    /// Thrown grenades summarized to one row each (cached): throw
+    /// (``throw_tick``/``throw_x``/``throw_y``/``throw_z``, the projectile's
+    /// first tracked position) and land (``land_tick``/``land_x``/``land_y``/
+    /// ``land_z``, its last tracked position — or, for HE, the
+    /// ``hegrenade_detonate`` event's own position when correlated, flagged
+    /// by ``land_is_precise``). For the full tick-by-tick trajectory, see
+    /// :attr:`grenades` — every ``entity_id`` here also appears there.
+    #[getter]
+    fn grenade_throws(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.projectile_frame(py, "grenade_throws")
     }
 
     /// Burning infernos (one row per fire, with its `[start_tick, end_tick]`; cached).
@@ -507,10 +527,21 @@ impl Demo {
     /// works even on GOTV demos, which omit the ``player_blind`` event).
     /// Columns: ``tick``, the resolved ``attacker_*`` (thrower) and
     /// ``victim_*`` (blinded player) ``steamid`` / ``name`` / ``side`` /
-    /// ``x`` / ``y`` / ``z``, and ``duration`` (blind seconds).
+    /// ``x`` / ``y`` / ``z``, ``duration`` (blind seconds), and
+    /// ``is_teammate`` (``true`` when attacker and victim resolved to the
+    /// same side — a team-flash).
+    ///
+    /// See also :attr:`flashes`, an alias for this exact dataset.
     #[getter]
     fn blinds(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.event_frame(py, "blinds")
+    }
+
+    /// Alias for :attr:`blinds` — same data, the more intuitive name. Both
+    /// return the identical cached DataFrame object; no extra computation.
+    #[getter]
+    fn flashes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.blinds(py)
     }
 
     /// Weapon-item transactions as a DataFrame (cached): purchases, pickups,
@@ -524,6 +555,31 @@ impl Demo {
         self.cached_frame(py, "item_events", || {
             let items = self.parser.item_events().map_err(to_py_err)?;
             item_events_to_frame(&items).map_err(polars_err)
+        })
+    }
+
+    /// Technical and tactical timeouts as a DataFrame (cached).
+    ///
+    /// Reconstructed from ``CCSGameRules`` state — the same entity-transition
+    /// approach as :attr:`rounds`, independent of it. Columns: ``side``
+    /// (``"terrorist"`` / ``"counter-terrorist"`` / ``None`` for a technical
+    /// pause), ``type`` (``"tactical"`` / ``"technical"``), ``start_tick``,
+    /// ``end_tick`` (``None`` if still active when the demo ends),
+    /// ``remaining_at_start`` (the timeout's nominal length in seconds;
+    /// ``None`` for technical), and ``round_num`` (the round in progress when
+    /// it started).
+    ///
+    /// Tactical timeouts (``m_bTerroristTimeOutActive`` /
+    /// ``m_bCTTimeOutActive``) are confirmed present and reliable on real
+    /// GOTV demos. Technical timeouts (``m_bGamePaused``) resolve the same
+    /// way but haven't been observed firing on a real demo yet — cross-check
+    /// against :attr:`rounds`' ``extended_freeze`` column, a corroborating,
+    /// field-name-agnostic signal, if a pause doesn't show up here.
+    #[getter]
+    fn timeouts(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.cached_frame(py, "timeouts", || {
+            let timeouts = self.parser.timeouts().map_err(to_py_err)?;
+            timeouts_to_frame(&timeouts).map_err(polars_err)
         })
     }
 
@@ -855,6 +911,7 @@ impl Demo {
                 "grenades" => grenades_to_frame(&projectiles.grenades),
                 "fires" => fires_to_frame(&projectiles.fires),
                 "smokes" => smokes_to_frame(&projectiles.smokes),
+                "grenade_throws" => grenade_throws_to_frame(&projectiles.grenade_throws),
                 _ => unreachable!("unknown projectile dataset"),
             }
             .map_err(polars_err)
@@ -1574,6 +1631,8 @@ fn rounds_to_frame(rounds: &[Round]) -> PolarsResult<DataFrame> {
         col!("reason", rounds, |r| r.reason),
         col!("reason_name", rounds, |r| r.reason_name.clone()),
         col!("is_knife_round", rounds, |r| r.is_knife_round),
+        col!("extended_freeze", rounds, |r| r.extended_freeze),
+        col!("freeze_ticks", rounds, |r| r.freeze_ticks),
     ])
 }
 
@@ -1674,6 +1733,25 @@ fn grenades_to_frame(grenades: &[Grenade]) -> PolarsResult<DataFrame> {
         col!("x", grenades, |g| g.x),
         col!("y", grenades, |g| g.y),
         col!("z", grenades, |g| g.z),
+    ])
+}
+
+fn grenade_throws_to_frame(throws: &[GrenadeThrow]) -> PolarsResult<DataFrame> {
+    df_from_columns(vec![
+        col!("thrower_name", throws, |t| t.thrower_name.clone()),
+        col!("thrower_steamid", throws, |t| t.thrower_steamid),
+        col!("thrower_side", throws, |t| t.thrower_side.clone()),
+        col!("type", throws, |t| t.grenade_type.clone()),
+        col!("entity_id", throws, |t| t.entity_id),
+        col!("throw_tick", throws, |t| t.throw_tick),
+        col!("throw_x", throws, |t| t.throw_x),
+        col!("throw_y", throws, |t| t.throw_y),
+        col!("throw_z", throws, |t| t.throw_z),
+        col!("land_tick", throws, |t| t.land_tick),
+        col!("land_x", throws, |t| t.land_x),
+        col!("land_y", throws, |t| t.land_y),
+        col!("land_z", throws, |t| t.land_z),
+        col!("land_is_precise", throws, |t| t.land_is_precise),
     ])
 }
 
@@ -1790,6 +1868,17 @@ fn item_events_to_frame(items: &[ItemEvent]) -> PolarsResult<DataFrame> {
     ])
 }
 
+fn timeouts_to_frame(timeouts: &[Timeout]) -> PolarsResult<DataFrame> {
+    df_from_columns(vec![
+        col!("side", timeouts, |t| t.side.clone()),
+        col!("type", timeouts, |t| t.kind.clone()),
+        col!("start_tick", timeouts, |t| t.start_tick),
+        col!("end_tick", timeouts, |t| t.end_tick),
+        col!("remaining_at_start", timeouts, |t| t.remaining_at_start),
+        col!("round_num", timeouts, |t| t.round_num),
+    ])
+}
+
 fn blinds_to_frame(blinds: &[Blind]) -> PolarsResult<DataFrame> {
     df_from_columns(vec![
         col!("tick", blinds, |b| b.tick),
@@ -1806,6 +1895,7 @@ fn blinds_to_frame(blinds: &[Blind]) -> PolarsResult<DataFrame> {
         col!("victim_y", blinds, |b| b.victim_y),
         col!("victim_z", blinds, |b| b.victim_z),
         col!("duration", blinds, |b| b.duration),
+        col!("is_teammate", blinds, |b| b.is_teammate),
     ])
 }
 

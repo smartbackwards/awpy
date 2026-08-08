@@ -106,6 +106,14 @@ enum Commands {
         /// Path to the demo file
         file: PathBuf,
     },
+    /// List thrown grenades: one row per throw with throw/land tick+position
+    GrenadeThrows {
+        /// Path to the demo file
+        file: PathBuf,
+        /// Maximum number of throws to display
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Summarize burning infernos (use --json for all rows)
     Fires {
         /// Path to the demo file
@@ -121,6 +129,14 @@ enum Commands {
         /// Path to the demo file
         file: PathBuf,
         /// Maximum number of blinds to display
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// List technical and tactical timeouts
+    Timeouts {
+        /// Path to the demo file
+        file: PathBuf,
+        /// Maximum number of timeouts to display
         #[arg(long)]
         limit: Option<usize>,
     },
@@ -231,9 +247,11 @@ fn main() -> Result<()> {
         Commands::Damage { file, limit } => commands::damage(&file, limit, json),
         Commands::Bomb { file } => commands::bomb(&file, json),
         Commands::Grenades { file } => commands::grenades(&file, json),
+        Commands::GrenadeThrows { file, limit } => commands::grenade_throws(&file, limit, json),
         Commands::Fires { file } => commands::fires(&file, "fires", json),
         Commands::Smokes { file } => commands::fires(&file, "smokes", json),
         Commands::Blinds { file, limit } => commands::blinds(&file, limit, json),
+        Commands::Timeouts { file, limit } => commands::timeouts(&file, limit, json),
         Commands::ItemEvents { file, limit } => commands::item_events(&file, limit, json),
         Commands::Shots { file, limit } => commands::shots(&file, limit, json),
         Commands::Stats { file } => commands::stats(&file, json),

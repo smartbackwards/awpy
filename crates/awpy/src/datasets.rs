@@ -105,6 +105,11 @@ const FLASH_MIN_DURATION: f32 = 0.1;
 /// flash is not.
 const FLASH_EDGE_MARGIN: f32 = 0.05;
 
+/// A round's freeze period counts as "extended" (see [`Round::extended_freeze`])
+/// when it exceeds the demo's own median freeze length by this factor — a
+/// corroborating, field-name-agnostic signal that a pause happened during it.
+const EXTENDED_FREEZE_FACTOR: f32 = 1.5;
+
 /// Player pawn entity — carries position, side, and a handle to the controller.
 const PLAYER_PAWN_CLASS: &str = "CCSPlayerPawn";
 /// Player controller entity — carries the persistent Steam id and name.
@@ -127,6 +132,8 @@ const BOMB_EVENTS: &[(&str, &str)] = &[
     ("bomb_abortplant", "interrupt_plant"),
     ("bomb_planted", "finish_plant"),
     ("bomb_defused", "defuse"),
+    ("bomb_begindefuse", "start_defuse"),
+    ("bomb_exploded", "explode"),
 ];
 
 /// Dotted field-path prefix for a pawn's networked world position.
@@ -196,6 +203,38 @@ pub struct Round {
     /// count toward the score and are excluded from [`Parser::player_stats`] by
     /// default.
     pub is_knife_round: bool,
+    /// This round's freeze period ran unusually long relative to the demo's
+    /// own baseline — a corroborating, field-name-agnostic signal that a
+    /// pause happened during it (alongside, not instead of,
+    /// [`Parser::timeouts`]'s direct field-based detection). `false` when
+    /// `freeze_ticks` is unavailable.
+    pub extended_freeze: bool,
+    /// This round's freeze period length in ticks (`freeze_end_tick -
+    /// start_tick`), when both are known.
+    pub freeze_ticks: Option<i32>,
+}
+
+/// A technical or tactical timeout, reconstructed from `CCSGameRules` state
+/// transitions (see [`Parser::timeouts`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Timeout {
+    /// Side that called the timeout (`"terrorist"` / `"counter-terrorist"`).
+    /// `None` for a technical (admin) pause, which is not team-specific.
+    pub side: Option<String>,
+    /// `"tactical"` (a team-called timeout, `m_b{Terrorist,CT}TimeOutActive`)
+    /// or `"technical"` (an admin pause, `m_bGamePaused`).
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub start_tick: i32,
+    /// `None` if the timeout was still active when the demo ended.
+    pub end_tick: Option<i32>,
+    /// The countdown value read at the timeout's start — its nominal length
+    /// in seconds. `None` for technical timeouts (no countdown is networked
+    /// for `m_bGamePaused`).
+    pub remaining_at_start: Option<f32>,
+    /// 1-indexed number of the round in progress when the timeout started
+    /// (mirrors [`Round::round_num`] — the round that will complete next).
+    pub round_num: i32,
 }
 
 /// A single kill, from a `player_death` game event, enriched with each resolved
@@ -402,6 +441,33 @@ pub struct Grenade {
     pub z: f32,
 }
 
+/// One thrown grenade, summarized to a single row: the throw (first tracked
+/// position) and the land (last tracked position — or, for HE, the
+/// `hegrenade_detonate` event's own position when correlated). See
+/// [`Parser::grenade_throws`]; every `entity_id` here also appears in the
+/// full per-tick trajectory, [`Parser::grenades`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GrenadeThrow {
+    pub thrower_name: Option<String>,
+    pub thrower_steamid: Option<u64>,
+    pub thrower_side: Option<String>,
+    #[serde(rename = "type")]
+    pub grenade_type: String,
+    pub entity_id: i32,
+    pub throw_tick: i32,
+    pub throw_x: f32,
+    pub throw_y: f32,
+    pub throw_z: f32,
+    pub land_tick: i32,
+    pub land_x: f32,
+    pub land_y: f32,
+    pub land_z: f32,
+    /// `true` when `land_x` / `land_y` / `land_z` came from a correlated
+    /// `hegrenade_detonate` event rather than the last tracked trajectory
+    /// sample. HE only — always `false` for every other grenade type.
+    pub land_is_precise: bool,
+}
+
 /// A single burning inferno (molotov / incendiary): one row per fire, with its
 /// landing position, thrower, and burn window `[start_tick, end_tick]`. See
 /// [`Parser::fires`].
@@ -457,6 +523,7 @@ pub struct Shot {
 }
 
 /// Internal per-tick sample used by the projectile-tracking datasets.
+#[derive(Clone)]
 struct TrackedRow {
     tick: i32,
     entity_id: i32,
@@ -467,6 +534,13 @@ struct TrackedRow {
     thrower: ResolvedPlayer,
     start_tick: i32,
     end_tick: i32,
+    /// Position at `end_tick` (the instance's last tracked sample). Filled in
+    /// alongside `end_tick` by [`fill_trajectory_ends`] / [`collapse_instances`];
+    /// a harmless placeholder (same as `x`/`y`/`z`) for `Windowed` rows, whose
+    /// single fixed position is unaffected either way.
+    end_x: f32,
+    end_y: f32,
+    end_z: f32,
 }
 
 /// Collapse per-tick projectile samples to one row per instance, keyed by
@@ -489,7 +563,12 @@ fn collapse_instances(rows: Vec<TrackedRow>) -> Vec<TrackedRow> {
                 by_key.insert(key, row);
             }
             Some(kept) => {
-                kept.end_tick = kept.end_tick.max(row.end_tick);
+                if row.end_tick > kept.end_tick {
+                    kept.end_tick = row.end_tick;
+                    kept.end_x = row.end_x;
+                    kept.end_y = row.end_y;
+                    kept.end_z = row.end_z;
+                }
                 // Recover the thrower from an earlier tick if the kept row's
                 // resolution had already degraded to None.
                 if kept.thrower.steamid.is_none() && row.thrower.steamid.is_some() {
@@ -524,25 +603,52 @@ enum ProjMode<'a> {
     Windowed(&'a HashMap<i32, Vec<(i32, i32)>>),
 }
 
-/// The three projectile datasets ([`Parser::grenades`], [`Parser::fires`],
-/// [`Parser::smokes`]), built together in one pass by
-/// [`Parser::projectiles`].
+/// The four projectile datasets ([`Parser::grenades`], [`Parser::fires`],
+/// [`Parser::smokes`], [`Parser::grenade_throws`]), built together in one
+/// pass by [`Parser::projectiles`].
 pub struct Projectiles {
     pub grenades: Vec<Grenade>,
     pub fires: Vec<Fire>,
     pub smokes: Vec<Smoke>,
+    pub grenade_throws: Vec<GrenadeThrow>,
 }
 
-/// Fill each trajectory instance's `end_tick` from the last tick its entity
-/// index was seen (grenades have no event window to bound them).
+/// Fill each trajectory instance's `end_tick` / `end_x` / `end_y` / `end_z`
+/// from the last tick its entity index was seen (grenades have no event
+/// window to bound them).
 fn fill_trajectory_ends(rows: &mut [TrackedRow]) {
-    let mut ends: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut ends: HashMap<(i32, i32), (i32, f32, f32, f32)> = HashMap::new();
     for r in rows.iter() {
-        let e = ends.entry((r.entity_id, r.start_tick)).or_insert(r.tick);
-        *e = (*e).max(r.tick);
+        let e = ends
+            .entry((r.entity_id, r.start_tick))
+            .or_insert((r.tick, r.x, r.y, r.z));
+        if r.tick >= e.0 {
+            *e = (r.tick, r.x, r.y, r.z);
+        }
     }
     for r in rows.iter_mut() {
-        r.end_tick = ends[&(r.entity_id, r.start_tick)];
+        let &(end_tick, end_x, end_y, end_z) = &ends[&(r.entity_id, r.start_tick)];
+        r.end_tick = end_tick;
+        r.end_x = end_x;
+        r.end_y = end_y;
+        r.end_z = end_z;
+    }
+}
+
+/// Refine an HE throw's landing position to its `hegrenade_detonate` event's
+/// own position — exact, rather than the last tick the entity happened to be
+/// sampled (which can lag true detonation by up to one tick). Only the
+/// position is overwritten; `land_tick` is deliberately left as the
+/// trajectory-derived value — the lower-latency, always-present source —
+/// rather than the event's own tick, so a small correlation-window mismatch
+/// can't leave `land_tick` disagreeing with every other grenade type's
+/// meaning ("last tracked tick").
+fn refine_he_land(throw: &mut GrenadeThrow, dets: &HashMap<i32, (i32, f32, f32, f32)>) {
+    if let Some(&(_tick, x, y, z)) = dets.get(&throw.entity_id) {
+        throw.land_x = x;
+        throw.land_y = y;
+        throw.land_z = z;
+        throw.land_is_precise = true;
     }
 }
 
@@ -900,6 +1006,35 @@ impl GameRulesKeys {
     }
 }
 
+/// Field keys used by [`Parser::timeouts`], resolved once on the
+/// `CCSGameRulesProxy` serializer: the two team tactical-timeout flags and
+/// their countdowns, the engine-level pause flag (technical timeouts), and
+/// the round counter (to label which round a timeout occurred during).
+/// Confirmed present and networked on real GOTV demos (empirically verified,
+/// unlike most `m_pGameRules.*` candidates that were only guessed at).
+struct TimeoutKeys {
+    t_active: Option<u64>,
+    ct_active: Option<u64>,
+    t_remaining: Option<u64>,
+    ct_remaining: Option<u64>,
+    paused: Option<u64>,
+    total_rounds: Option<u64>,
+}
+
+impl TimeoutKeys {
+    fn resolve(ser: &crate::entity::Serializer) -> Self {
+        let key = |name: &str| ser.resolve_field_key(name);
+        Self {
+            t_active: key("m_pGameRules.m_bTerroristTimeOutActive"),
+            ct_active: key("m_pGameRules.m_bCTTimeOutActive"),
+            t_remaining: key("m_pGameRules.m_flTerroristTimeOutRemaining"),
+            ct_remaining: key("m_pGameRules.m_flCTTimeOutRemaining"),
+            paused: key("m_pGameRules.m_bGamePaused"),
+            total_rounds: key("m_pGameRules.m_totalRoundsPlayed"),
+        }
+    }
+}
+
 /// The four player-enriched, event-based datasets ([`Parser::kills`],
 /// [`Parser::damages`], [`Parser::bomb`], [`Parser::blinds`]), built together in
 /// one entity-decode pass by [`Parser::event_datasets`].
@@ -1154,6 +1289,10 @@ fn detect_blinds(
             &mut blind.victim_y,
             &mut blind.victim_z,
         );
+        blind.is_teammate = matches!(
+            (&blind.attacker_side, &blind.victim_side),
+            (Some(a), Some(v)) if a == v
+        );
         out.push(blind);
     }
 }
@@ -1230,6 +1369,7 @@ impl Parser {
             if !warmup && total == prev_total + 1 {
                 let win_status = entity.get_i64(k.win_status);
                 let reason = entity.get_i64(k.win_reason) as i32;
+                let freeze_ticks = start_tick.zip(freeze_end_tick).map(|(s, e)| e - s);
                 rounds.push(Round {
                     round_num: total,
                     start_tick,
@@ -1241,6 +1381,8 @@ impl Parser {
                     reason,
                     reason_name: round_end_reason_name(reason as i64).to_string(),
                     is_knife_round: false, // filled in by mark_knife_rounds below
+                    extended_freeze: false, // filled in by mark_extended_freeze below
+                    freeze_ticks,
                 });
                 start_tick = None;
                 freeze_end_tick = None;
@@ -1269,7 +1411,174 @@ impl Parser {
         })?;
 
         self.mark_knife_rounds(&mut rounds)?;
+        Self::mark_extended_freeze(&mut rounds);
         Ok(rounds)
+    }
+
+    /// Flag rounds whose freeze period ran unusually long relative to the
+    /// demo's own baseline — a corroborating signal that a pause happened
+    /// during it (see [`Round::extended_freeze`]). The baseline is the
+    /// median `freeze_ticks` across all rounds in the demo; flagged rounds
+    /// exceed it by more than [`EXTENDED_FREEZE_FACTOR`].
+    ///
+    /// A `mp_freezetime` convar cross-check would be more precise, but
+    /// [`Parser::convars`] is its own full demo scan — not worth paying on
+    /// every [`Parser::rounds`] call for a corroborating-only signal.
+    fn mark_extended_freeze(rounds: &mut [Round]) {
+        let mut ticks: Vec<i32> = rounds.iter().filter_map(|r| r.freeze_ticks).collect();
+        if ticks.len() < 2 {
+            return;
+        }
+        ticks.sort_unstable();
+        let median = (ticks[ticks.len() / 2] as f32).max(1.0);
+        for r in rounds.iter_mut() {
+            r.extended_freeze = r
+                .freeze_ticks
+                .is_some_and(|t| t as f32 > median * EXTENDED_FREEZE_FACTOR);
+        }
+    }
+
+    /// Reconstruct tactical and technical timeouts from `CCSGameRules` state
+    /// transitions.
+    ///
+    /// Tactical timeouts are read from each team's own
+    /// `m_bTerroristTimeOutActive` / `m_bCTTimeOutActive` flag (with
+    /// `m_flTerroristTimeOutRemaining` / `m_flCTTimeOutRemaining` giving the
+    /// timeout's nominal length as the countdown value at its rising edge).
+    /// Technical timeouts are read from the engine-level `m_bGamePaused`
+    /// flag. Both are genuinely networked — confirmed present and flipping
+    /// on a real GOTV demo — unlike `player_blind`/chat/round events, which
+    /// GOTV demos commonly strip.
+    ///
+    /// This performs its own full entity decode (filtered to the game-rules
+    /// entity), independent of [`Parser::rounds`]. See also
+    /// [`Round::extended_freeze`] for a corroborating, field-name-agnostic
+    /// signal, useful if some pause mechanism other than these two flags is
+    /// ever encountered (e.g. a hard admin `sv_pause` rather than a
+    /// competitive-ruleset team timeout).
+    pub fn timeouts(&self) -> Result<Vec<Timeout>> {
+        let filter: HashSet<&str> = HashSet::from([GAME_RULES_CLASS]);
+
+        let mut out: Vec<Timeout> = Vec::new();
+        let mut keys: Option<TimeoutKeys> = None;
+        let mut round_num: i32 = 1;
+
+        let mut t_open: Option<(i32, f32)> = None;
+        let mut ct_open: Option<(i32, f32)> = None;
+        let mut pause_open: Option<i32> = None;
+        let mut prev_t = false;
+        let mut prev_ct = false;
+        let mut prev_paused = false;
+
+        self.run_to_end_filtered(&filter, |ctx| {
+            let Some((_, entity)) = ctx
+                .entities()
+                .iter()
+                .find(|(_, e)| e.class_name.as_ref() == GAME_RULES_CLASS)
+            else {
+                return;
+            };
+            let Some(ser) = ctx.serializers().get(GAME_RULES_CLASS) else {
+                return;
+            };
+            let k = keys.get_or_insert_with(|| TimeoutKeys::resolve(ser));
+
+            // The round currently being contested — one past the completed-
+            // round count, matching `Round::round_num`'s numbering for the
+            // round that will complete next.
+            round_num = entity.get_i64(k.total_rounds) as i32 + 1;
+
+            let t_active = entity.get_bool(k.t_active);
+            let ct_active = entity.get_bool(k.ct_active);
+            let paused = entity.get_bool(k.paused);
+
+            if t_active && !prev_t {
+                t_open = Some((ctx.tick(), entity.get_f32(k.t_remaining)));
+            } else if !t_active
+                && prev_t
+                && let Some((start, remaining)) = t_open.take()
+            {
+                out.push(Timeout {
+                    side: Some("terrorist".to_string()),
+                    kind: "tactical".to_string(),
+                    start_tick: start,
+                    end_tick: Some(ctx.tick()),
+                    remaining_at_start: Some(remaining),
+                    round_num,
+                });
+            }
+
+            if ct_active && !prev_ct {
+                ct_open = Some((ctx.tick(), entity.get_f32(k.ct_remaining)));
+            } else if !ct_active
+                && prev_ct
+                && let Some((start, remaining)) = ct_open.take()
+            {
+                out.push(Timeout {
+                    side: Some("counter-terrorist".to_string()),
+                    kind: "tactical".to_string(),
+                    start_tick: start,
+                    end_tick: Some(ctx.tick()),
+                    remaining_at_start: Some(remaining),
+                    round_num,
+                });
+            }
+
+            if paused && !prev_paused {
+                pause_open = Some(ctx.tick());
+            } else if !paused
+                && prev_paused
+                && let Some(start) = pause_open.take()
+            {
+                out.push(Timeout {
+                    side: None,
+                    kind: "technical".to_string(),
+                    start_tick: start,
+                    end_tick: Some(ctx.tick()),
+                    remaining_at_start: None,
+                    round_num,
+                });
+            }
+
+            prev_t = t_active;
+            prev_ct = ct_active;
+            prev_paused = paused;
+        })?;
+
+        // Flush any timeout still active when the demo ends.
+        if let Some((start, remaining)) = t_open {
+            out.push(Timeout {
+                side: Some("terrorist".to_string()),
+                kind: "tactical".to_string(),
+                start_tick: start,
+                end_tick: None,
+                remaining_at_start: Some(remaining),
+                round_num,
+            });
+        }
+        if let Some((start, remaining)) = ct_open {
+            out.push(Timeout {
+                side: Some("counter-terrorist".to_string()),
+                kind: "tactical".to_string(),
+                start_tick: start,
+                end_tick: None,
+                remaining_at_start: Some(remaining),
+                round_num,
+            });
+        }
+        if let Some(start) = pause_open {
+            out.push(Timeout {
+                side: None,
+                kind: "technical".to_string(),
+                start_tick: start,
+                end_tick: None,
+                remaining_at_start: None,
+                round_num,
+            });
+        }
+
+        out.sort_by_key(|t| t.start_tick);
+        Ok(out)
     }
 
     /// Flag knife rounds in place: a round with at least one kill whose kills are
@@ -1453,10 +1762,12 @@ impl Parser {
         Ok(self.event_datasets()?.damages)
     }
 
-    /// Collect bomb actions (pickup / drop / plant / defuse) with the acting
-    /// player (Steam id, name, world position) and, while planted, the bomb
-    /// site. Note that some demos don't emit the begin/abort-plant events, so
-    /// `start_plant` / `interrupt_plant` rows may be absent.
+    /// Collect bomb actions (pickup / drop / plant / defuse-start / defuse /
+    /// explode) with the acting player (Steam id, name, world position) and,
+    /// while planted, the bomb site. Note that some demos don't emit the
+    /// begin/abort-plant events, so `start_plant` / `interrupt_plant` rows may
+    /// be absent; likewise `start_defuse` / `explode` rows are only present
+    /// in rounds where the bomb was actually defused or exploded.
     ///
     /// Built alongside kills / damages / blinds in [`Parser::event_datasets`].
     pub fn bomb(&self) -> Result<Vec<BombEvent>> {
@@ -1486,6 +1797,24 @@ impl Parser {
             }
         }
         Ok(intervals)
+    }
+
+    /// `hegrenade_detonate` events, keyed by the detonating entity's own id —
+    /// confirmed present on `entityid` (unlike `flashbang_detonate`'s use in
+    /// [`detect_blinds`], which doesn't need it), so this is exact
+    /// correlation, not a distance heuristic. Used by [`refine_he_land`].
+    fn hegrenade_detonations(&self) -> Result<HashMap<i32, (i32, f32, f32, f32)>> {
+        let mut out = HashMap::new();
+        for e in self.events_ref()? {
+            if e.name != "hegrenade_detonate" {
+                continue;
+            }
+            let k = Keys(&e.keys);
+            if let (Some(x), Some(y), Some(z)) = (k.f32("x"), k.f32("y"), k.f32("z")) {
+                out.insert(k.i32("entityid"), (e.tick, x, y, z));
+            }
+        }
+        Ok(out)
     }
 
     /// Track projectile entities tick by tick in one pass, sampling each active
@@ -1597,6 +1926,9 @@ impl Parser {
                             thrower: thrower.clone(),
                             start_tick,
                             end_tick,
+                            end_x: x,
+                            end_y: y,
+                            end_z: z,
                         },
                     ));
                 }
@@ -1647,6 +1979,34 @@ impl Parser {
         }
         fill_trajectory_ends(&mut grenade_rows);
 
+        let hegrenade_dets = self.hegrenade_detonations()?;
+        let grenade_throws = collapse_instances(grenade_rows.clone())
+            .into_iter()
+            .map(|r| {
+                let grenade_type = grenade_type(&r.class_name).unwrap_or("grenade");
+                let mut throw = GrenadeThrow {
+                    thrower_name: r.thrower.name,
+                    thrower_steamid: r.thrower.steamid,
+                    thrower_side: r.thrower.side,
+                    grenade_type: grenade_type.to_string(),
+                    entity_id: r.entity_id,
+                    throw_tick: r.tick,
+                    throw_x: r.x,
+                    throw_y: r.y,
+                    throw_z: r.z,
+                    land_tick: r.end_tick,
+                    land_x: r.end_x,
+                    land_y: r.end_y,
+                    land_z: r.end_z,
+                    land_is_precise: false,
+                };
+                if grenade_type == "he" {
+                    refine_he_land(&mut throw, &hegrenade_dets);
+                }
+                throw
+            })
+            .collect();
+
         let grenades = grenade_rows
             .into_iter()
             .map(|r| Grenade {
@@ -1695,6 +2055,7 @@ impl Parser {
             grenades,
             fires,
             smokes,
+            grenade_throws,
         })
     }
 
@@ -1704,6 +2065,18 @@ impl Parser {
     /// Built alongside fires / smokes in [`Parser::projectiles`].
     pub fn grenades(&self) -> Result<Vec<Grenade>> {
         Ok(self.projectiles()?.grenades)
+    }
+
+    /// Thrown grenades summarized to one row each: the throw (first tracked
+    /// position) and the land (last tracked position — or, for HE, the
+    /// `hegrenade_detonate` event's own position when correlated; see
+    /// [`GrenadeThrow::land_is_precise`]). For the full tick-by-tick
+    /// trajectory, see [`Parser::grenades`] — every `entity_id` here also
+    /// appears there.
+    ///
+    /// Built alongside grenades / fires / smokes in [`Parser::projectiles`].
+    pub fn grenade_throws(&self) -> Result<Vec<GrenadeThrow>> {
+        Ok(self.projectiles()?.grenade_throws)
     }
 
     /// Burning infernos (molotov / incendiary): one row per fire, with its
@@ -1874,6 +2247,11 @@ pub struct Blind {
     pub victim_z: Option<f32>,
     /// Blind duration in seconds (`m_flFlashDuration` at onset).
     pub duration: f32,
+    /// Whether the thrower and the blinded player are on the same (known)
+    /// side — a team-flash. Mirrors `stats::is_confirmed_enemy`'s convention
+    /// in reverse: `true` only when both sides resolved and equal, so an
+    /// unresolved side never counts as a team-flash.
+    pub is_teammate: bool,
 }
 
 /// A weapon-item transaction (see [`Parser::item_events`]): a purchase, a

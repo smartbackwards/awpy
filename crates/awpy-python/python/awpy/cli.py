@@ -185,7 +185,7 @@ def damage(file: DemoArg, limit: LimitOpt = None, as_json: JsonOpt = False) -> N
 
 @app.command(rich_help_panel=_DEMO_PANEL)
 def bomb(file: DemoArg, limit: LimitOpt = None, as_json: JsonOpt = False) -> None:
-    """List bomb actions (pickup / drop / plant / defuse) with site."""
+    """List bomb actions (pickup / drop / plant / defuse-start / defuse / explode) with site."""
     _emit_df(_load(file).bomb, limit=limit, as_json=as_json)
 
 
@@ -199,6 +199,12 @@ def shots(file: DemoArg, limit: LimitOpt = None, as_json: JsonOpt = False) -> No
 def grenades(file: DemoArg, limit: LimitOpt = None, as_json: JsonOpt = False) -> None:
     """Summarize thrown-grenade trajectories."""
     _emit_df(_load(file).grenades, limit=limit, as_json=as_json)
+
+
+@app.command(name="grenade-throws", rich_help_panel=_DEMO_PANEL)
+def grenade_throws(file: DemoArg, limit: LimitOpt = None, as_json: JsonOpt = False) -> None:
+    """One row per thrown grenade: throw and land tick/position."""
+    _emit_df(_load(file).grenade_throws, limit=limit, as_json=as_json)
 
 
 @app.command(rich_help_panel=_DEMO_PANEL)
@@ -217,6 +223,12 @@ def smokes(file: DemoArg, limit: LimitOpt = None, as_json: JsonOpt = False) -> N
 def blinds(file: DemoArg, limit: LimitOpt = None, as_json: JsonOpt = False) -> None:
     """List flash events: who was blinded, by whom, and for how long."""
     _emit_df(_load(file).blinds, limit=limit, as_json=as_json)
+
+
+@app.command(rich_help_panel=_DEMO_PANEL)
+def timeouts(file: DemoArg, limit: LimitOpt = None, as_json: JsonOpt = False) -> None:
+    """List technical and tactical timeouts."""
+    _emit_df(_load(file).timeouts, limit=limit, as_json=as_json)
 
 
 @app.command(name="item-events", rich_help_panel=_DEMO_PANEL)

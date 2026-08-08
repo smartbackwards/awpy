@@ -800,6 +800,8 @@ mod tests {
             reason: 0,
             reason_name: "t_win".into(),
             is_knife_round: false,
+            extended_freeze: false,
+            freeze_ticks: None,
         }
     }
 
