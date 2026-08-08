@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::demo::{Context, GameEvent, Parser};
 use crate::entity::Entity;
+use crate::entity::field_path::FieldPath;
 use crate::error::Result;
 use crate::hitgroups::hitgroup_name;
 use crate::position::cell_to_world;
@@ -794,27 +795,27 @@ impl CtrlKeys {
 /// [`PlayerState`]: the primary / secondary weapon, per-type grenade counts,
 /// and the full comma-separated inventory string (in slot order).
 ///
-/// Every grenade type is capped at 1 held *entity*, so "found a matching
-/// weapon entity" is the count used here — including flashbangs, even though
-/// CS2 lets a player hold 2. That undercounts a double-flash hold as 1: CS2
-/// only ever instantiates one `CFlashbang` entity per player regardless of
-/// whether they hold 1 or 2 (confirmed empirically — max simultaneous owned
-/// `CFlashbang` entities per player, across a full real match, is 1), so no
-/// amount of entity-counting can recover the true value. Investigated whether
-/// any *field* on that single entity carries the real count instead: neither
-/// `m_iClip1`/`m_iClip2` (always 0) nor `m_pReserveAmmo[0..2]` (fixed
-/// `int32[2]`, manually addressable via a hand-built `FieldPath` since
-/// `resolve_field_key`'s dotted-path parser has no case for fixed C-array
-/// indices — see `crates/awpy/examples/reserve_ammo_probe.rs`) vary with hold
-/// count: `m_pReserveAmmo` reads a constant `(0, 1)` in 100% of ~900k owned
-/// samples checked, whether holding 1 or 2. Nor does `m_pWeaponServices
-/// .m_iAmmo[]` (the pawn-level reserve-ammo array guns use) — always 0 for
-/// grenades. If CS2 networks this distinction at all, it isn't in any of
-/// these obvious places; `flashbangs` should be read as "at least one held".
+/// Every grenade type except flashbangs is capped at 1 held *entity*, so
+/// "found a matching weapon entity" is the count. Flashbangs are the
+/// exception (CS2 allows 2), and counting entities undercounts a double hold
+/// as 1 — CS2 only ever instantiates one `CFlashbang` entity per player
+/// regardless of whether they hold 1 or 2. The true count lives instead on
+/// the *pawn's* `m_pWeaponServices.m_iAmmo[14]` (confirmed empirically —
+/// index 14 tracks 0/1/2 correctly across independent players/entities,
+/// exactly matching known purchase timing) — a fixed `uint16[32]` reserve-
+/// ammo array, the same one guns use for reserve bullets. It isn't reachable
+/// via `resolve_field_key`'s dotted-path parser (no case for fixed C-array
+/// indices — only *dynamic*/networked-vector arrays get numeric-index
+/// handling), so `flashbang_ammo_key` in [`SnapshotKeys`] is built by hand,
+/// the same technique `crates/awpy/examples/reserve_ammo_probe.rs`
+/// demonstrates (that example chased a *different*, dead-end fixed array,
+/// `CFlashbang`'s own `m_pReserveAmmo` — left in place as a worked example of
+/// the technique, and as a record that that specific field isn't it).
 fn fill_loadout(
     ctx: &Context,
     pawn: &Entity,
     weapon_keys: &[Option<u64>],
+    flashbang_ammo_key: Option<u64>,
     state: &mut PlayerState,
 ) {
     // Build the comma-joined inventory directly, without an intermediate Vec.
@@ -838,7 +839,15 @@ fn fill_loadout(
             WeaponSlot::Secondary => state.secondary_weapon = Some(info.name),
             WeaponSlot::Grenade => match info.name {
                 "hegrenade" => state.he_grenades += 1,
-                "flashbang" => state.flashbangs += 1,
+                "flashbang" => {
+                    // An entity existing means at least 1; m_iAmmo[14], when it
+                    // resolves and reads > 0, gives the exact held count (1 or 2).
+                    let count = flashbang_ammo_key
+                        .map(|k| pawn.get_i64(Some(k)))
+                        .filter(|&n| n > 0)
+                        .unwrap_or(1);
+                    state.flashbangs += count as i32;
+                }
                 "smokegrenade" => state.smoke_grenades += 1,
                 "molotov" | "incendiary" => state.fire_grenades += 1,
                 "decoy" => state.decoy_grenades += 1,
@@ -878,7 +887,22 @@ struct SnapshotKeys {
     active_weapon: Option<u64>,
     weapon_count: Option<u64>,
     weapons: Vec<Option<u64>>,
+    /// Manually-addressed `m_pWeaponServices.m_iAmmo[14]` — flashbang reserve
+    /// ammo, the true 0/1/2 held-count (see `fill_loadout`'s doc comment).
+    /// `resolve_field_key` can resolve the *bare* `m_iAmmo` path fine (a
+    /// nested-pointer path with no numeric suffix), giving `m_pWeaponServices`
+    /// and `m_iAmmo`'s own field indices; the fixed-array element index (14)
+    /// is then appended by hand onto that same `FieldPath`, since fixed
+    /// C-array indices have no dotted-path syntax of their own.
+    flashbang_ammo_key: Option<u64>,
 }
+
+/// `m_iAmmo` index confirmed (empirically, against two independent players'
+/// entities) to track flashbang reserve count: 0 → 1 → 2 exactly matching
+/// known purchase ticks. CS2's ammo-type indices are a fixed, per-game-build
+/// constant, not per-demo, so this should hold across demos of the same
+/// client version.
+const FLASHBANG_AMMO_INDEX: u8 = 14;
 
 impl SnapshotKeys {
     fn resolve(ctx: &Context) -> Self {
@@ -909,6 +933,15 @@ impl SnapshotKeys {
             weapons: (0..MAX_INVENTORY)
                 .map(|i| key(&format!("m_pWeaponServices.m_hMyWeapons.{i}")))
                 .collect(),
+            flashbang_ammo_key: key("m_pWeaponServices.m_iAmmo").map(|base| {
+                let base_fp = FieldPath::unpack(base);
+                let mut fp = FieldPath::default();
+                fp.data[0] = base_fp.data[0];
+                fp.data[1] = base_fp.data[1];
+                fp.data[2] = FLASHBANG_AMMO_INDEX;
+                fp.last = 2;
+                fp.pack()
+            }),
         }
     }
 }
@@ -2186,11 +2219,11 @@ pub struct PlayerState {
     pub smoke_grenades: i32,
     /// Number of HE grenades held.
     pub he_grenades: i32,
-    /// Number of flashbangs held — really "at least one held" (0 or 1), not a
-    /// true count. CS2 lets a player hold 2, but only ever instantiates one
-    /// `CFlashbang` entity regardless; see `fill_loadout`'s doc comment (in
-    /// `datasets.rs`) for what was checked (and ruled out) trying to recover
-    /// the real count.
+    /// Number of flashbangs held (0, 1, or 2 — the one grenade type CS2 lets
+    /// you carry two of), read from `m_pWeaponServices.m_iAmmo[14]` on the
+    /// pawn rather than counted from entities (there's only ever one
+    /// `CFlashbang` entity per player regardless of hold count — see
+    /// `fill_loadout`'s doc comment in `datasets.rs`).
     pub flashbangs: i32,
     /// Number of decoy grenades held.
     pub decoy_grenades: i32,
@@ -2622,7 +2655,13 @@ impl Parser {
                 .and_then(|w| weapon_info(&w.class_name))
                 .map(|i| i.name);
             let count = (pawn.get_i64(keys.weapon_count) as usize).min(keys.weapons.len());
-            fill_loadout(ctx, pawn, &keys.weapons[..count], &mut state);
+            fill_loadout(
+                ctx,
+                pawn,
+                &keys.weapons[..count],
+                keys.flashbang_ammo_key,
+                &mut state,
+            );
             // Skip reserve/uninitialized pawns: the engine keeps spare
             // `CCSPlayerPawn` entities that sit at the world origin with no team.
             // A pawn in play is always on T or CT — dead players keep their team

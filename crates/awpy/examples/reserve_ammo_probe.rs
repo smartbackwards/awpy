@@ -1,4 +1,5 @@
-//! Reusable technique demo + a specific (negative) finding.
+//! Reusable technique demo + a specific dead end (the *right* field turned
+//! out to be a different one — see `weapon_count_probe.rs`).
 //!
 //! **Technique**: manually address a fixed-size C array's Nth element —
 //! `resolve_field_key`'s dotted-path string parser has no case for fixed
@@ -7,17 +8,21 @@
 //! string path can select one). `FieldPath` is public in pbdems2 though, so
 //! build one by hand the same way the library does internally for dynamic
 //! arrays: `data[0] = field_idx`, `data[1] = array_idx`, `last = 1`, then
-//! `.pack()`. Reuse this pattern for any other fixed-array field investigation.
+//! `.pack()`. Reuse this pattern for any other fixed-array field investigation
+//! — it's the same technique `weapon_count_probe.rs` uses successfully.
 //!
 //! **This specific probe** was chasing whether `CFlashbang`'s `m_pReserveAmmo:
 //! int32[2]` distinguishes holding 1 vs 2 flashbangs (CS2's one grenade type
-//! you can carry two of; `PlayerState.flashbangs` currently can't, since only
-//! one `CFlashbang` entity ever exists per player regardless of hold count —
-//! see `fill_loadout`'s doc comment in `datasets.rs`). **Result: no.** Filtered
-//! to player-owned (not dropped) entities, the pair reads a constant `(0, 1)`
-//! in 100% of ~900k samples across a real match, whether holding 1 or 2 — this
-//! field carries no information about hold count. Left here so the next
-//! attempt doesn't have to re-derive the technique or re-check this field.
+//! you can carry two of). **Result: no** — filtered to player-owned (not
+//! dropped) entities, the pair reads a constant `(0, 1)` in 100% of ~900k
+//! samples across a real match, whether holding 1 or 2. The entity-count
+//! finding this probe *also* established is still correct, though — CS2 only
+//! ever instantiates one `CFlashbang` entity per player regardless of hold
+//! count — the true count just isn't *on* that entity. It's on the pawn
+//! instead: `m_pWeaponServices.m_iAmmo[14]`, confirmed working — see
+//! `weapon_count_probe.rs` and `fill_loadout`'s doc comment in `datasets.rs`.
+//! Left here anyway so the next fixed-array investigation doesn't have to
+//! re-derive the technique, and as a record that `m_pReserveAmmo` isn't it.
 //!
 //! `cargo run --release --example reserve_ammo_probe -- <demo>`
 

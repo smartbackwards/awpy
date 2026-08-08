@@ -511,7 +511,7 @@ range; combined with a sampler, they bound it. At least one must be given.
 | `fire_grenades` | i32 | Molotov + incendiary held. |
 | `smoke_grenades` | i32 | Smoke grenades held. |
 | `he_grenades` | i32 | HE grenades held. |
-| `flashbangs` | i32 | Flashbangs held. |
+| `flashbangs` | i32 | Flashbangs held — 0, 1, or 2 (the one grenade type CS2 lets you carry two of). |
 | `decoy_grenades` | i32 | Decoy grenades held. |
 | `equipment_value` | i32 | Value of current equipment (`m_unCurrentEquipmentValue`). |
 | `equipment_value_round_start` | i32 | Equipment value at the round start. |

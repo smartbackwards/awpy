@@ -290,6 +290,28 @@ def test_snapshot_economy(demo_path: Path) -> None:
     for col in ("he_grenades", "flashbangs", "smoke_grenades", "fire_grenades", "decoy_grenades"):
         assert snap[col].min() >= 0
     assert (snap["inventory"].str.count_matches("c4") <= 1).all()
+
+
+def test_flashbangs_reaches_two(demo_path: Path) -> None:
+    """CS2 lets a player hold 2 flashbangs -- the one grenade type that isn't
+    capped at 1. `flashbangs` is read from the pawn's own
+    `m_pWeaponServices.m_iAmmo[14]` (reserve ammo) rather than counted from
+    `m_hMyWeapons` entities, since CS2 only ever instantiates one
+    `CFlashbang` entity per player regardless of hold count -- entity-counting
+    alone can never see past 1. Bounds-check every other grenade type stays
+    capped at 1 (still counted from entities) while flashbangs reaches 2 on a
+    real match, matching an independent count (demoparser2's own `inventory`
+    list) on the fixture this was validated against.
+    """
+    demo = Demo(demo_path)
+    snap = demo.snapshots(seconds=1.0)
+    for col in ("he_grenades", "smoke_grenades", "fire_grenades", "decoy_grenades"):
+        assert snap[col].max() <= 1
+    assert snap["flashbangs"].max() <= 2
+    # Not a hard guarantee for every possible demo, but overwhelmingly true
+    # for any real competitive match of reasonable length -- double-flash
+    # buys are common. A demo where this never holds would be worth a look.
+    assert (snap["flashbangs"] == 2).any()
     # The primary/secondary names, when present, appear in the inventory string.
     for row in snap.iter_rows(named=True):
         if row["secondary_weapon"]:

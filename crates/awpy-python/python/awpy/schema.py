@@ -37,7 +37,7 @@ SNAPSHOT_PROPERTIES: dict[str, str] = {
     "fire_grenades": "m_pWeaponServices.m_hMyWeapons (molotov / incendiary)",
     "smoke_grenades": "m_pWeaponServices.m_hMyWeapons (smoke)",
     "he_grenades": "m_pWeaponServices.m_hMyWeapons (HE)",
-    "flashbangs": "m_pWeaponServices.m_hMyWeapons (flashbang)",
+    "flashbangs": "m_pWeaponServices.m_iAmmo[14]",
     "decoy_grenades": "m_pWeaponServices.m_hMyWeapons (decoy)",
     "inventory": "m_pWeaponServices.m_hMyWeapons (full loadout, slot order)",
     # ── Economy ──
