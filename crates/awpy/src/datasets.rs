@@ -793,6 +793,24 @@ impl CtrlKeys {
 /// Walk a pawn's `m_hMyWeapons` handles and fill the loadout fields of a
 /// [`PlayerState`]: the primary / secondary weapon, per-type grenade counts,
 /// and the full comma-separated inventory string (in slot order).
+///
+/// Every grenade type is capped at 1 held *entity*, so "found a matching
+/// weapon entity" is the count used here — including flashbangs, even though
+/// CS2 lets a player hold 2. That undercounts a double-flash hold as 1: CS2
+/// only ever instantiates one `CFlashbang` entity per player regardless of
+/// whether they hold 1 or 2 (confirmed empirically — max simultaneous owned
+/// `CFlashbang` entities per player, across a full real match, is 1), so no
+/// amount of entity-counting can recover the true value. Investigated whether
+/// any *field* on that single entity carries the real count instead: neither
+/// `m_iClip1`/`m_iClip2` (always 0) nor `m_pReserveAmmo[0..2]` (fixed
+/// `int32[2]`, manually addressable via a hand-built `FieldPath` since
+/// `resolve_field_key`'s dotted-path parser has no case for fixed C-array
+/// indices — see `crates/awpy/examples/reserve_ammo_probe.rs`) vary with hold
+/// count: `m_pReserveAmmo` reads a constant `(0, 1)` in 100% of ~900k owned
+/// samples checked, whether holding 1 or 2. Nor does `m_pWeaponServices
+/// .m_iAmmo[]` (the pawn-level reserve-ammo array guns use) — always 0 for
+/// grenades. If CS2 networks this distinction at all, it isn't in any of
+/// these obvious places; `flashbangs` should be read as "at least one held".
 fn fill_loadout(
     ctx: &Context,
     pawn: &Entity,
@@ -2168,7 +2186,11 @@ pub struct PlayerState {
     pub smoke_grenades: i32,
     /// Number of HE grenades held.
     pub he_grenades: i32,
-    /// Number of flashbangs held.
+    /// Number of flashbangs held — really "at least one held" (0 or 1), not a
+    /// true count. CS2 lets a player hold 2, but only ever instantiates one
+    /// `CFlashbang` entity regardless; see `fill_loadout`'s doc comment (in
+    /// `datasets.rs`) for what was checked (and ruled out) trying to recover
+    /// the real count.
     pub flashbangs: i32,
     /// Number of decoy grenades held.
     pub decoy_grenades: i32,

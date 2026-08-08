@@ -28,7 +28,7 @@ over" broadcast.
 | `reason_name` | str | Human-readable reason (e.g. `bomb_defused`, `ct_win`). |
 | `is_knife_round` | bool | Whether this is a knife round — a side-decider round where every kill is a melee (knife) kill, with no firearm or grenade kills. Excluded from `stats` by default. |
 | `freeze_ticks` | i32? | This round's freeze period length (`freeze_end_tick - start_tick`), when both are known. |
-| `extended_freeze` | bool | This round's freeze period ran unusually long relative to the demo's own baseline — a corroborating, field-name-agnostic signal that a pause happened during it. Cross-reference against [`timeouts`](#timeouts), which detects pauses directly from game-rules state. |
+| `extended_freeze` | bool | This round's freeze period ran unusually long relative to the demo's own baseline — a corroborating, field-name-agnostic signal that a pause happened during it. Cross-reference against `demo.timeouts` (below), which detects pauses directly from game-rules state. |
 
 ```python
 # Final score by side
@@ -344,6 +344,10 @@ demo.rounds.filter(pl.col("extended_freeze")).join(
     demo.timeouts, on="round_num", how="left"
 )
 ```
+
+See the **⏸️ Timeouts** page (in the sidebar, under Match data) for the full
+picture — why there are three ways to find a timeout, and how they were
+validated against each other.
 
 ## `stats`
 
