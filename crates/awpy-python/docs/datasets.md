@@ -55,6 +55,8 @@ For each of `attacker`, `victim`, `assister`:
 | `<who>_name` | str? | Display name (`m_iszPlayerName`). |
 | `<who>_side` | str? | `terrorist` / `counter-terrorist`. |
 | `<who>_x` / `_y` / `_z` | f32? | World position (Hammer units) at the kill tick. |
+| `<who>_team_clan_name` | str? | Team clan name (`m_szClan`) — from the demo itself, not external match metadata. |
+| `<who>_cash_spent_this_round` | i32? | Cash spent so far this round (`m_iCashSpentThisRound`). |
 
 Plus the kill's own fields: `weapon` (str), `headshot` (bool), `dominated`,
 `noscope` (bool), `penetrated`, `revenge`, `thrusmoke` (bool), `attacker_blind`
@@ -62,7 +64,10 @@ Plus the kill's own fields: `weapon` (str), `headshot` (bool), `dominated`,
 (bool), `distance` (f32 — attacker-to-victim distance **in meters**, not
 Hammer units; `0.0` on `weapon == "world"` kills, which have no attacker to
 measure from), `hitgroup`, `hitgroup_name`, `is_trade` (bool),
-`victim_traded` (bool), and `tick`. `attacker_blind` / `attacker_in_air` /
+`victim_traded` (bool), `round_num` (i32? — the round whose own `rounds()`
+boundary, `start_tick` falling back to `freeze_end_tick`/`end_tick`, is the
+latest one at or before this row's `tick`; `null` only for a tick before any
+round has started), and `tick`. `attacker_blind` / `attacker_in_air` /
 `distance` are read directly from `player_death`'s own event fields (the
 server's own determination), not derived from entity state.
 
@@ -119,11 +124,27 @@ Steam id, name, side, and world position (like `kills`), plus the victim's
 health/armor before and after the hit.
 
 For each of `attacker`, `victim`: `<who>_steamid`, `<who>_name`, `<who>_side`,
-`<who>_x` / `_y` / `_z`. Plus: `weapon`, `dmg_health`, `dmg_armor`, `hitgroup`,
-`hitgroup_name`, `health_pre` / `health_post`, `armor_pre` / `armor_post`, and
-`tick`. Pre-values are reconstructed as `post + damage`, clamped to the 100 HP /
-armor cap — CS2 reports raw damage, so a lethal hit's `dmg_health` can exceed the
-victim's health (e.g. an AWP for 115), which would otherwise imply >100 pre-HP.
+`<who>_x` / `_y` / `_z`, `<who>_team_clan_name`, `<who>_cash_spent_this_round`.
+Plus: `weapon`, `dmg_health`, `dmg_armor`, `hitgroup`, `hitgroup_name`,
+`health_pre` / `health_post`, `armor_pre` / `armor_post`, `dmg_health_real`,
+`round_num`, and `tick`. Pre-values are reconstructed as `post + damage`,
+clamped to the 100 HP / armor cap — CS2 reports raw damage, so a lethal hit's
+`dmg_health` can exceed the victim's health (e.g. an AWP for 115), which would
+otherwise imply >100 pre-HP.
+
+`dmg_health_real` is the victim's *actual* health lost to this hit — unlike
+`dmg_health` (the raw event value, which can exceed remaining health on an
+overkill hit, or be a small placeholder rather than real damage on a
+round-timeout `weapon == "world"` loss), it's their true health at the moment
+of the hit — `health_post` from their previous hit this life, or 100 on their
+first hit since spawning — minus this hit's own `health_post`. Tracked across
+`player_hurt` / `player_spawn` events by the victim's own pawn handle (not
+steamid, so it's unaffected by dead pawns going unidentified — see `ticks`'
+`steamid` note). Exact for any hit after a life's first (confirmed against
+the old pipeline's `hpDamageTaken`); the first hit of a life is occasionally
+off by a small amount from the 100-HP baseline (not fully root-caused —
+plausibly armor-split rounding or a spawn-health timing nuance), but still
+meaningfully closer to the truth than `dmg_health` alone.
 
 ## `bomb`
 
@@ -222,10 +243,12 @@ demo.shots
 ```
 
 One row per `weapon_fire` event, with the shooter's state and active-weapon
-state. Columns: `tick`, `steamid`, `name`, `side`, `x`, `y`, `z`, `pitch`,
-`yaw`, `weapon`, `scoped`, `inaccuracy` (the weapon's networked accuracy
-penalty), `num_bullets_remaining` (active weapon's clip). Reading the active
-weapon requires a full entity pass, so this is the slowest dataset.
+state. Columns: `tick`, `round_num`, `steamid`, `name`, `side`, `x`, `y`, `z`,
+`team_clan_name`, `cash_spent_this_round`, `pitch`, `yaw`, `weapon`, `scoped`,
+`inaccuracy` (the weapon's networked accuracy penalty),
+`num_bullets_remaining` (active weapon's clip — what other CS2 tooling
+sometimes calls `active_weapon_ammo`). Reading the active weapon requires a
+full entity pass, so this is the slowest dataset.
 
 ## `blinds`
 
@@ -506,14 +529,16 @@ range; combined with a sampler, they bound it. At least one must be given.
 
 | Column | Type | Description |
 | --- | --- | --- |
+| `round_num` | i32? | 1-indexed round this snapshot falls in — the round whose own `rounds()` boundary (`start_tick`, falling back to `freeze_end_tick`/`end_tick`) is the latest one at or before `tick`. `null` only for a tick before any round has started. |
 | `ping` | i32? | Network ping in milliseconds (`m_iPing`, from the controller). |
 | `place` | str? | Named callout location (`m_szLastPlaceName`, e.g. `TSpawn`, `Mid`, `BombsiteA`) — the same per-area names CS2's own radar/HUD show. |
+| `team_clan_name` | str? | Team clan name (`m_szClan`, from the controller) — from the demo itself, not external match metadata. |
 | `health` | i32 | Hit points. |
 | `armor` | i32 | Armor value. |
 | `has_helmet` | bool | Kevlar + helmet. |
 | `has_defuser` | bool | Defuse kit. |
 | `has_bomb` | bool | Carrying the C4. |
-| `active_weapon` | str? | Short name of the weapon currently held. (Per-shot clip / accuracy is on `shots`.) |
+| `active_weapon` | str? | Short name of the weapon currently held. (Clip ammo isn't reliably present on a fresh full-packet keyframe until the weapon's been fired at least once, so it isn't exposed here -- use `shots.num_bullets_remaining`, which reads it at a `weapon_fire` tick, where firing itself guarantees the field is present.) |
 | `primary_weapon` | str? | Primary-slot weapon (rifle / SMG / shotgun / sniper / LMG), or null. |
 | `secondary_weapon` | str? | Pistol held, or null. |
 | `fire_grenades` | i32 | Molotov + incendiary held. |
@@ -524,6 +549,7 @@ range; combined with a sampler, they bound it. At least one must be given.
 | `equipment_value` | i32 | Value of current equipment (`m_unCurrentEquipmentValue`). |
 | `equipment_value_round_start` | i32 | Equipment value at the round start. |
 | `money` | i32 | Cash on hand. |
+| `cash_spent_this_round` | i32 | Cash spent so far this round (`m_iCashSpentThisRound`). |
 | `is_crouched` | bool | Fully ducked. |
 | `is_walking` | bool | Moving quietly. |
 | `is_jumping` | bool | Airborne (off the ground). |

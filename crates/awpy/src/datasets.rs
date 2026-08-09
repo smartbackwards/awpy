@@ -176,7 +176,7 @@ impl<'a> Keys<'a> {
 }
 
 /// A single round, reconstructed from `CCSGameRules` state transitions.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Round {
     /// 1-indexed round number (the value of `m_totalRoundsPlayed` at round end).
     pub round_num: i32,
@@ -215,6 +215,36 @@ pub struct Round {
     pub freeze_ticks: Option<i32>,
 }
 
+/// Sorted `(anchor_tick, round_num)` pairs for round-lookup-by-tick, used to
+/// stamp `round_num` on kills/damages/shots/snapshots after the fact (they're
+/// built from a separate decode pass than [`Parser::rounds`], so this is a
+/// join, not something computed inline). Each round's anchor is its earliest
+/// known boundary — `start_tick`, falling back to `freeze_end_tick`, falling
+/// back to `end_tick` for the pathological case where neither is known.
+fn round_num_anchors(rounds: &[Round]) -> Vec<(i32, i32)> {
+    let mut anchors: Vec<(i32, i32)> = rounds
+        .iter()
+        .map(|r| {
+            (
+                r.start_tick.or(r.freeze_end_tick).unwrap_or(r.end_tick),
+                r.round_num,
+            )
+        })
+        .collect();
+    anchors.sort_unstable_by_key(|&(t, _)| t);
+    anchors
+}
+
+/// The `round_num` of the round whose anchor is the latest one at or before
+/// `tick` — `None` if `tick` precedes every round's anchor (e.g. a
+/// pre-match/warmup tick with no round yet).
+fn round_num_for_tick(anchors: &[(i32, i32)], tick: i32) -> Option<i32> {
+    match anchors.partition_point(|&(t, _)| t <= tick) {
+        0 => None,
+        i => Some(anchors[i - 1].1),
+    }
+}
+
 /// A technical or tactical timeout, reconstructed from `CCSGameRules` state
 /// transitions (see [`Parser::timeouts`]).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -247,6 +277,11 @@ pub struct Timeout {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Kill {
     pub tick: i32,
+    /// 1-indexed round this kill occurred in (see [`Round::round_num`]) --
+    /// the round whose own anchor tick (`start_tick`, or `freeze_end_tick` /
+    /// `end_tick` as fallbacks) is the latest one at or before this kill's
+    /// tick. `None` only for a tick before any round has started.
+    pub round_num: Option<i32>,
 
     pub attacker_steamid: Option<u64>,
     pub attacker_name: Option<String>,
@@ -254,6 +289,8 @@ pub struct Kill {
     pub attacker_x: Option<f32>,
     pub attacker_y: Option<f32>,
     pub attacker_z: Option<f32>,
+    pub attacker_team_clan_name: Option<String>,
+    pub attacker_cash_spent_this_round: Option<i32>,
 
     pub victim_steamid: Option<u64>,
     pub victim_name: Option<String>,
@@ -261,6 +298,8 @@ pub struct Kill {
     pub victim_x: Option<f32>,
     pub victim_y: Option<f32>,
     pub victim_z: Option<f32>,
+    pub victim_team_clan_name: Option<String>,
+    pub victim_cash_spent_this_round: Option<i32>,
 
     pub assister_steamid: Option<u64>,
     pub assister_name: Option<String>,
@@ -268,6 +307,8 @@ pub struct Kill {
     pub assister_x: Option<f32>,
     pub assister_y: Option<f32>,
     pub assister_z: Option<f32>,
+    pub assister_team_clan_name: Option<String>,
+    pub assister_cash_spent_this_round: Option<i32>,
 
     pub weapon: String,
     pub headshot: bool,
@@ -363,6 +404,9 @@ pub fn trade_flags(kills: &[Kill], trade_ticks: i32) -> Vec<(bool, bool)> {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Damage {
     pub tick: i32,
+    /// 1-indexed round this damage occurred in — see [`Kill::round_num`]'s
+    /// doc comment for the exact lookup rule.
+    pub round_num: Option<i32>,
 
     pub attacker_steamid: Option<u64>,
     pub attacker_name: Option<String>,
@@ -370,6 +414,8 @@ pub struct Damage {
     pub attacker_x: Option<f32>,
     pub attacker_y: Option<f32>,
     pub attacker_z: Option<f32>,
+    pub attacker_team_clan_name: Option<String>,
+    pub attacker_cash_spent_this_round: Option<i32>,
 
     pub victim_steamid: Option<u64>,
     pub victim_name: Option<String>,
@@ -377,6 +423,8 @@ pub struct Damage {
     pub victim_x: Option<f32>,
     pub victim_y: Option<f32>,
     pub victim_z: Option<f32>,
+    pub victim_team_clan_name: Option<String>,
+    pub victim_cash_spent_this_round: Option<i32>,
 
     pub weapon: String,
     pub dmg_health: i32,
@@ -391,6 +439,27 @@ pub struct Damage {
     pub armor_pre: i32,
     /// Victim armor after the hit (the event's `armor`).
     pub armor_post: i32,
+    /// The victim's *actual* health lost to this hit -- unlike `dmg_health`
+    /// (the event's own raw value, which can exceed what the victim actually
+    /// had left on an overkill hit, or be a small placeholder rather than a
+    /// real damage amount on a round-timeout `weapon == "world"` loss), this
+    /// is the victim's true health at the moment of the hit -- their
+    /// `health_post` from their previous hit this life, or 100 if this is
+    /// their first hit since spawning -- minus this hit's own `health_post`.
+    /// Tracked across `player_hurt`/`player_spawn` events in tick order,
+    /// keyed by the victim's own pawn handle (not steamid, so it's
+    /// unaffected by the dead-pawn identity gap `PlayerState.steamid`
+    /// documents).
+    ///
+    /// Exact for any hit after the first one in a life (confirmed against the
+    /// old, demoparser2-based pipeline's equivalent `hpDamageTaken` field on
+    /// real match data). The very first hit of a life is occasionally off by
+    /// a small amount from the 100-HP baseline (observed ±1 on a real demo,
+    /// not fully root-caused -- plausibly armor-split rounding or a
+    /// spawn-health timing nuance neither this fork nor demoparser2 fully
+    /// resolves); still meaningfully closer to the truth than `dmg_health`
+    /// alone, which carries no such correction at all.
+    pub dmg_health_real: i32,
 }
 
 /// Build a [`Damage`] from a `player_hurt` event's own fields, leaving the
@@ -519,12 +588,17 @@ pub struct Smoke {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Shot {
     pub tick: i32,
+    /// 1-indexed round this shot occurred in — see [`Kill::round_num`]'s
+    /// doc comment for the exact lookup rule.
+    pub round_num: Option<i32>,
     pub steamid: Option<u64>,
     pub name: Option<String>,
     pub side: Option<String>,
     pub x: Option<f32>,
     pub y: Option<f32>,
     pub z: Option<f32>,
+    pub team_clan_name: Option<String>,
+    pub cash_spent_this_round: Option<i32>,
     pub pitch: Option<f32>,
     pub yaw: Option<f32>,
     pub weapon: String,
@@ -532,6 +606,9 @@ pub struct Shot {
     /// Networked accuracy penalty of the active weapon (a proxy for inaccuracy;
     /// CS2 does not network the fully-computed inaccuracy).
     pub inaccuracy: Option<f32>,
+    /// Current clip ammo of the active weapon (`m_iClip1`) — what OLD-pipeline
+    /// naming conventions call `active_weapon_ammo`; distinct from reserve
+    /// ammo, which this dataset doesn't carry.
     pub num_bullets_remaining: Option<i32>,
 }
 
@@ -675,10 +752,16 @@ struct ResolvedPlayer {
     x: Option<f32>,
     y: Option<f32>,
     z: Option<f32>,
+    /// Team clan name (`m_szClan`), from the demo itself, not external match
+    /// metadata.
+    team_clan_name: Option<String>,
+    /// Cash spent so far this round (`m_iCashSpentThisRound`).
+    cash_spent_this_round: Option<i32>,
 }
 
 impl ResolvedPlayer {
-    /// Move the resolved fields into a row's `{prefix}_steamid/name/side/x/y/z`.
+    /// Move the resolved fields into a row's
+    /// `{prefix}_steamid/name/side/x/y/z/team_clan_name/cash_spent_this_round`.
     #[allow(clippy::too_many_arguments)]
     fn assign_to(
         self,
@@ -688,6 +771,8 @@ impl ResolvedPlayer {
         x: &mut Option<f32>,
         y: &mut Option<f32>,
         z: &mut Option<f32>,
+        team_clan_name: &mut Option<String>,
+        cash_spent_this_round: &mut Option<i32>,
     ) {
         *steamid = self.steamid;
         *name = self.name;
@@ -695,6 +780,8 @@ impl ResolvedPlayer {
         *x = self.x;
         *y = self.y;
         *z = self.z;
+        *team_clan_name = self.team_clan_name;
+        *cash_spent_this_round = self.cash_spent_this_round;
     }
 }
 
@@ -792,6 +879,8 @@ struct CtrlKeys {
     steamid: Option<u64>,
     name: Option<u64>,
     money: Option<u64>,
+    /// Cash spent so far this round (`m_pInGameMoneyServices.m_iCashSpentThisRound`).
+    cash_spent_this_round: Option<u64>,
 }
 
 impl CtrlKeys {
@@ -802,6 +891,7 @@ impl CtrlKeys {
             steamid: key("m_steamID"),
             name: key("m_iszPlayerName"),
             money: key("m_pInGameMoneyServices.m_iAccount"),
+            cash_spent_this_round: key("m_pInGameMoneyServices.m_iCashSpentThisRound"),
         }
     }
 }
@@ -979,7 +1069,7 @@ impl SnapshotKeys {
 /// every weapon class so held loadouts can be resolved from the filtered decode.
 fn snapshot_filter() -> HashSet<&'static str> {
     let mut filter: HashSet<&'static str> =
-        HashSet::from([PLAYER_PAWN_CLASS, PLAYER_CONTROLLER_CLASS]);
+        HashSet::from([PLAYER_PAWN_CLASS, PLAYER_CONTROLLER_CLASS, TEAM_CLASS]);
     filter.extend(weapon_classes());
     filter
 }
@@ -1021,14 +1111,20 @@ fn segment_ranges(offsets: &[(usize, i32)], n: usize) -> Vec<(Option<usize>, i32
 /// pawn's controller handle to the controller (for Steam id and name). Returns
 /// an all-`None` [`ResolvedPlayer`] when the handle does not point at a live
 /// player pawn.
-fn resolve_player(ctx: &Context, pawn_handle: i64, pk: &PawnKeys, ck: &CtrlKeys) -> ResolvedPlayer {
+fn resolve_player(
+    ctx: &Context,
+    pawn_handle: i64,
+    pk: &PawnKeys,
+    ck: &CtrlKeys,
+    clans: &HashMap<i64, String>,
+) -> ResolvedPlayer {
     let Some(pawn) = ctx.entities().get_by_handle(pawn_handle as u32) else {
         return ResolvedPlayer::default();
     };
     if !pawn.class_name.contains("PlayerPawn") {
         return ResolvedPlayer::default();
     }
-    resolve_from_pawn(ctx, pawn, pk, ck)
+    resolve_from_pawn(ctx, pawn, pk, ck, clans)
 }
 
 /// Resolve a participant from a player-pawn entity already in hand.
@@ -1036,9 +1132,17 @@ fn resolve_player(ctx: &Context, pawn_handle: i64, pk: &PawnKeys, ck: &CtrlKeys)
 /// Reads side and world position off the pawn, then follows its controller
 /// handle for the persistent Steam id and name. Use [`resolve_player`] when you
 /// only have a pawn `CHandle` (e.g. from a game event).
-fn resolve_from_pawn(ctx: &Context, pawn: &Entity, pk: &PawnKeys, ck: &CtrlKeys) -> ResolvedPlayer {
+fn resolve_from_pawn(
+    ctx: &Context,
+    pawn: &Entity,
+    pk: &PawnKeys,
+    ck: &CtrlKeys,
+    clans: &HashMap<i64, String>,
+) -> ResolvedPlayer {
+    let team = pawn.get_i64(pk.team);
     let mut player = ResolvedPlayer {
-        side: Some(team_name(pawn.get_i64(pk.team)).to_string()),
+        side: Some(team_name(team).to_string()),
+        team_clan_name: clans.get(&team).cloned(),
         ..Default::default()
     };
 
@@ -1059,9 +1163,58 @@ fn resolve_from_pawn(ctx: &Context, pawn: &Entity, pk: &PawnKeys, ck: &CtrlKeys)
     {
         player.steamid = controller.get_u64(ck.steamid);
         player.name = controller.get_string(ck.name);
+        player.cash_spent_this_round =
+            Some(controller.get_i64(ck.cash_spent_this_round) as i32);
     }
 
     player
+}
+
+/// Field keys on the `CCSTeam` serializer, resolved once.
+struct TeamKeys {
+    team_num: Option<u64>,
+    clan: Option<u64>,
+}
+
+impl TeamKeys {
+    fn resolve(ctx: &Context) -> Self {
+        let ser = ctx.serializers().get(TEAM_CLASS);
+        let key = |name: &str| ser.and_then(|s| s.resolve_field_key(name));
+        Self {
+            team_num: key("m_iTeamNum"),
+            clan: key("m_szClanTeamname"),
+        }
+    }
+}
+
+/// Update `clans` (team number -> clan name) from any `CCSTeam` entities in
+/// this tick's decoded state.
+///
+/// Clan names live on `CCSTeam`, keyed by team number -- **not** on the
+/// controller: `CCSPlayerController.m_szClan` resolves fine in the schema
+/// (`resolve_field_key` finds it) but reads an empty string at runtime on
+/// every real match tested; confirmed empirically after `team_clan_name`
+/// initially shipped reading `m_szClan` and came back blank. `Parser::players`
+/// already had this right — this mirrors its exact lookup.
+///
+/// An empty string means the server hasn't named this team yet; an existing
+/// entry is left in place rather than blanked, so a name learned early in
+/// the demo survives ticks where the field happens to read empty.
+fn update_clans(ctx: &Context, tk: &TeamKeys, clans: &mut HashMap<i64, String>) {
+    for (_, e) in ctx.entities().iter() {
+        if !e.active || e.class_name.as_ref() != TEAM_CLASS {
+            continue;
+        }
+        let team = e.get_i64(tk.team_num);
+        // Only the playing sides matter; 0 / 1 are unassigned and spectator,
+        // which never carry a clan name.
+        if team <= 1 {
+            continue;
+        }
+        if let Some(clan) = e.get_string(tk.clan).filter(|c| !c.is_empty()) {
+            clans.insert(team, clan);
+        }
+    }
 }
 
 /// Field keys on the `CCSGameRulesProxy` serializer, resolved once.
@@ -1145,16 +1298,23 @@ fn det_dist2(d: &Detonation, x: f32, y: f32, z: f32) -> f32 {
 }
 
 /// Fill a [`Kill`] row from the player-death event and entity state at its tick.
-fn fill_kill(kill: &mut Kill, e: &GameEvent, ctx: &Context, pk: &PawnKeys, ck: &CtrlKeys) {
+fn fill_kill(
+    kill: &mut Kill,
+    e: &GameEvent,
+    ctx: &Context,
+    pk: &PawnKeys,
+    ck: &CtrlKeys,
+    clans: &HashMap<i64, String>,
+) {
     let k = Keys(&e.keys);
     // The `*_pawn` keys are CHandles to each participant's pawn; a `65535` user
     // id means "no participant" (e.g. no assister).
-    let attacker = resolve_player(ctx, k.i64("attacker_pawn"), pk, ck);
-    let victim = resolve_player(ctx, k.i64("userid_pawn"), pk, ck);
+    let attacker = resolve_player(ctx, k.i64("attacker_pawn"), pk, ck, clans);
+    let victim = resolve_player(ctx, k.i64("userid_pawn"), pk, ck, clans);
     let assister = if k.i32("assister") == NO_USER_ID {
         ResolvedPlayer::default()
     } else {
-        resolve_player(ctx, k.i64("assister_pawn"), pk, ck)
+        resolve_player(ctx, k.i64("assister_pawn"), pk, ck, clans)
     };
     attacker.assign_to(
         &mut kill.attacker_steamid,
@@ -1163,6 +1323,8 @@ fn fill_kill(kill: &mut Kill, e: &GameEvent, ctx: &Context, pk: &PawnKeys, ck: &
         &mut kill.attacker_x,
         &mut kill.attacker_y,
         &mut kill.attacker_z,
+        &mut kill.attacker_team_clan_name,
+        &mut kill.attacker_cash_spent_this_round,
     );
     victim.assign_to(
         &mut kill.victim_steamid,
@@ -1171,6 +1333,8 @@ fn fill_kill(kill: &mut Kill, e: &GameEvent, ctx: &Context, pk: &PawnKeys, ck: &
         &mut kill.victim_x,
         &mut kill.victim_y,
         &mut kill.victim_z,
+        &mut kill.victim_team_clan_name,
+        &mut kill.victim_cash_spent_this_round,
     );
     assister.assign_to(
         &mut kill.assister_steamid,
@@ -1179,14 +1343,23 @@ fn fill_kill(kill: &mut Kill, e: &GameEvent, ctx: &Context, pk: &PawnKeys, ck: &
         &mut kill.assister_x,
         &mut kill.assister_y,
         &mut kill.assister_z,
+        &mut kill.assister_team_clan_name,
+        &mut kill.assister_cash_spent_this_round,
     );
 }
 
 /// Fill a [`Damage`] row from the player-hurt event and entity state.
-fn fill_damage(dmg: &mut Damage, e: &GameEvent, ctx: &Context, pk: &PawnKeys, ck: &CtrlKeys) {
+fn fill_damage(
+    dmg: &mut Damage,
+    e: &GameEvent,
+    ctx: &Context,
+    pk: &PawnKeys,
+    ck: &CtrlKeys,
+    clans: &HashMap<i64, String>,
+) {
     let k = Keys(&e.keys);
-    let attacker = resolve_player(ctx, k.i64("attacker_pawn"), pk, ck);
-    let victim = resolve_player(ctx, k.i64("userid_pawn"), pk, ck);
+    let attacker = resolve_player(ctx, k.i64("attacker_pawn"), pk, ck, clans);
+    let victim = resolve_player(ctx, k.i64("userid_pawn"), pk, ck, clans);
     attacker.assign_to(
         &mut dmg.attacker_steamid,
         &mut dmg.attacker_name,
@@ -1194,6 +1367,8 @@ fn fill_damage(dmg: &mut Damage, e: &GameEvent, ctx: &Context, pk: &PawnKeys, ck
         &mut dmg.attacker_x,
         &mut dmg.attacker_y,
         &mut dmg.attacker_z,
+        &mut dmg.attacker_team_clan_name,
+        &mut dmg.attacker_cash_spent_this_round,
     );
     victim.assign_to(
         &mut dmg.victim_steamid,
@@ -1202,6 +1377,8 @@ fn fill_damage(dmg: &mut Damage, e: &GameEvent, ctx: &Context, pk: &PawnKeys, ck
         &mut dmg.victim_x,
         &mut dmg.victim_y,
         &mut dmg.victim_z,
+        &mut dmg.victim_team_clan_name,
+        &mut dmg.victim_cash_spent_this_round,
     );
 }
 
@@ -1228,9 +1405,10 @@ fn fill_bomb(
     pk: &PawnKeys,
     ck: &CtrlKeys,
     bombsite: Option<&str>,
+    clans: &HashMap<i64, String>,
 ) {
     let k = Keys(&e.keys);
-    let player = resolve_player(ctx, k.i64("userid_pawn"), pk, ck);
+    let player = resolve_player(ctx, k.i64("userid_pawn"), pk, ck, clans);
     row.steamid = player.steamid;
     row.name = player.name;
     row.x = player.x;
@@ -1272,15 +1450,18 @@ fn fill_shot(
     ck: &CtrlKeys,
     sk: &ShotKeys,
     weapon_keys: &mut HashMap<String, (Option<u64>, Option<u64>)>,
+    clans: &HashMap<i64, String>,
 ) {
     let k = Keys(&e.keys);
-    let player = resolve_player(ctx, k.i64("userid_pawn"), pk, ck);
+    let player = resolve_player(ctx, k.i64("userid_pawn"), pk, ck, clans);
     shot.steamid = player.steamid;
     shot.name = player.name;
     shot.side = player.side;
     shot.x = player.x;
     shot.y = player.y;
     shot.z = player.z;
+    shot.team_clan_name = player.team_clan_name;
+    shot.cash_spent_this_round = player.cash_spent_this_round;
 
     let Some(pawn) = ctx.entities().get_by_handle(k.i64("userid_pawn") as u32) else {
         return;
@@ -1320,6 +1501,7 @@ fn detect_blinds(
     pk: &PawnKeys,
     ck: &CtrlKeys,
     out: &mut Vec<Blind>,
+    clans: &HashMap<i64, String>,
 ) {
     let dets = detonations.get(&ctx.tick());
     for (idx, pawn) in ctx.entities().iter() {
@@ -1337,7 +1519,7 @@ fn detect_blinds(
         let Some(dets) = dets else {
             continue;
         };
-        let victim = resolve_from_pawn(ctx, pawn, pk, ck);
+        let victim = resolve_from_pawn(ctx, pawn, pk, ck, clans);
         // Attribute to the nearest detonation (by victim position); with a single
         // detonation this is unambiguous.
         let det = match (victim.x, victim.y, victim.z) {
@@ -1347,12 +1529,15 @@ fn detect_blinds(
                 .expect("dets is non-empty"),
             _ => &dets[0],
         };
-        let attacker = resolve_player(ctx, det.thrower_pawn, pk, ck);
+        let attacker = resolve_player(ctx, det.thrower_pawn, pk, ck, clans);
         let mut blind = Blind {
             tick: ctx.tick(),
             duration: cur,
             ..Default::default()
         };
+        // `Blind` doesn't carry team_clan_name/cash_spent_this_round (not
+        // requested for this dataset) -- these two locals just absorb them.
+        let (mut _atcn, mut _acstr, mut _vtcn, mut _vcstr) = (None, None, None, None);
         attacker.assign_to(
             &mut blind.attacker_steamid,
             &mut blind.attacker_name,
@@ -1360,6 +1545,8 @@ fn detect_blinds(
             &mut blind.attacker_x,
             &mut blind.attacker_y,
             &mut blind.attacker_z,
+            &mut _atcn,
+            &mut _acstr,
         );
         victim.assign_to(
             &mut blind.victim_steamid,
@@ -1368,6 +1555,8 @@ fn detect_blinds(
             &mut blind.victim_x,
             &mut blind.victim_y,
             &mut blind.victim_z,
+            &mut _vtcn,
+            &mut _vcstr,
         );
         blind.is_teammate = matches!(
             (&blind.attacker_side, &blind.victim_side),
@@ -1715,17 +1904,31 @@ impl Parser {
         let mut detonations: HashMap<i32, Vec<Detonation>> = HashMap::new();
 
         // Shots follow the active-weapon handle to a weapon entity, so the pass
-        // must also decode weapon entities.
-        let mut filter: HashSet<&str> =
-            HashSet::from([PLAYER_PAWN_CLASS, PLAYER_CONTROLLER_CLASS, PLANTED_C4_CLASS]);
+        // must also decode weapon entities. TEAM_CLASS carries the clan names
+        // (see `update_clans`'s doc comment for why that's not on the
+        // controller, despite `m_szClan` resolving fine in the schema).
+        let mut filter: HashSet<&str> = HashSet::from([
+            PLAYER_PAWN_CLASS,
+            PLAYER_CONTROLLER_CLASS,
+            PLANTED_C4_CLASS,
+            TEAM_CLASS,
+        ]);
         filter.extend(weapon_classes());
         let mut pawn_keys: Option<PawnKeys> = None;
         let mut ctrl_keys: Option<CtrlKeys> = None;
+        let mut team_keys: Option<TeamKeys> = None;
+        let mut clans: HashMap<i64, String> = HashMap::new();
         let mut site_key: Option<Option<u64>> = None;
         let mut flash_key: Option<Option<u64>> = None;
         let mut prev_flash: HashMap<i32, f32> = HashMap::new();
         let mut shot_keys: Option<ShotKeys> = None;
         let mut weapon_keys: HashMap<String, (Option<u64>, Option<u64>)> = HashMap::new();
+        // Last-known health per victim pawn (by its raw event handle, not
+        // steamid -- unaffected by the dead-pawn identity gap), for
+        // `Damage.dmg_health_real`. Reset to 100 on `player_spawn`, updated to
+        // `health_post` after every `player_hurt`; a pawn with no entry yet
+        // (first hit of a life we didn't see the spawn for) defaults to 100.
+        let mut health_cache: HashMap<u32, i32> = HashMap::new();
 
         // These datasets consume legacy key/value pairs only. Select their
         // event names up front so unrelated legacy events and all CS2 user
@@ -1733,6 +1936,7 @@ impl Parser {
         let mut event_names: HashSet<&str> = HashSet::from([
             "player_death",
             "player_hurt",
+            "player_spawn",
             "flashbang_detonate",
             "weapon_fire",
         ]);
@@ -1741,18 +1945,28 @@ impl Parser {
         self.run_to_end_with_legacy_events_filtered(&filter, &event_names, |ctx, events| {
             let pk = pawn_keys.get_or_insert_with(|| PawnKeys::resolve(ctx));
             let ck = ctrl_keys.get_or_insert_with(|| CtrlKeys::resolve(ctx));
+            let tk = team_keys.get_or_insert_with(|| TeamKeys::resolve(ctx));
+            update_clans(ctx, tk, &mut clans);
 
             for event in events {
                 match event.name.as_str() {
                     "player_death" => {
                         let mut kill = kill_event_fields(event);
-                        fill_kill(&mut kill, event, ctx, pk, ck);
+                        fill_kill(&mut kill, event, ctx, pk, ck, &clans);
                         kills.push(kill);
                     }
                     "player_hurt" => {
                         let mut damage = damage_event_fields(event);
-                        fill_damage(&mut damage, event, ctx, pk, ck);
+                        fill_damage(&mut damage, event, ctx, pk, ck, &clans);
+                        let victim_pawn = Keys(&event.keys).i64("userid_pawn") as u32;
+                        let pre_health = *health_cache.get(&victim_pawn).unwrap_or(&100);
+                        damage.dmg_health_real = (pre_health - damage.health_post).max(0);
+                        health_cache.insert(victim_pawn, damage.health_post);
                         damages.push(damage);
+                    }
+                    "player_spawn" => {
+                        let victim_pawn = Keys(&event.keys).i64("userid_pawn") as u32;
+                        health_cache.insert(victim_pawn, MAX_HEALTH);
                     }
                     "flashbang_detonate" => {
                         let keys = Keys(&event.keys);
@@ -1770,7 +1984,7 @@ impl Parser {
                             ..Default::default()
                         };
                         let sk = shot_keys.get_or_insert_with(|| ShotKeys::resolve(ctx));
-                        fill_shot(&mut shot, event, ctx, pk, ck, sk, &mut weapon_keys);
+                        fill_shot(&mut shot, event, ctx, pk, ck, sk, &mut weapon_keys, &clans);
                         shots.push(shot);
                     }
                     _ => {
@@ -1787,7 +2001,7 @@ impl Parser {
                                 event: (*label).to_string(),
                                 ..Default::default()
                             };
-                            fill_bomb(&mut row, event, ctx, pk, ck, bomb_site(ctx, sk));
+                            fill_bomb(&mut row, event, ctx, pk, ck, bomb_site(ctx, sk), &clans);
                             bomb.push(row);
                         }
                     }
@@ -1800,7 +2014,7 @@ impl Parser {
                     .get(PLAYER_PAWN_CLASS)
                     .and_then(|s| s.resolve_field_key("m_flFlashDuration"))
             });
-            detect_blinds(ctx, &detonations, &mut prev_flash, fk, pk, ck, &mut blinds);
+            detect_blinds(ctx, &detonations, &mut prev_flash, fk, pk, ck, &mut blinds, &clans);
         })?;
 
         // Trades need every kill's resolved sides, so they are classified after
@@ -1810,6 +2024,19 @@ impl Parser {
         for (kill, (is_trade, victim_traded)) in kills.iter_mut().zip(flags) {
             kill.is_trade = is_trade;
             kill.victim_traded = victim_traded;
+        }
+
+        // round_num is a join against `rounds()` (a separate decode pass),
+        // not something resolvable inline during the event scan above.
+        let anchors = round_num_anchors(&self.rounds()?);
+        for k in &mut kills {
+            k.round_num = round_num_for_tick(&anchors, k.tick);
+        }
+        for d in &mut damages {
+            d.round_num = round_num_for_tick(&anchors, d.tick);
+        }
+        for s in &mut shots {
+            s.round_num = round_num_for_tick(&anchors, s.tick);
         }
 
         Ok(EventDatasets {
@@ -1926,6 +2153,10 @@ impl Parser {
         let mut starts: HashMap<i32, i32> = HashMap::new();
         let mut last_pos: HashMap<i32, (f32, f32, f32)> = HashMap::new();
 
+        // Grenade/fire/smoke throwers don't carry team_clan_name (not part of
+        // those datasets' schema) -- an always-empty map is a cheap, correct
+        // no-op for the clans lookup inside resolve_player.
+        let no_clans: HashMap<i64, String> = HashMap::new();
         self.run_to_end_filtered(&filter, |ctx| {
             let pk = pawn_keys.get_or_insert_with(|| PawnKeys::resolve(ctx));
             let ck = ctrl_keys.get_or_insert_with(|| CtrlKeys::resolve(ctx));
@@ -1962,7 +2193,7 @@ impl Parser {
                 let thrower = e
                     .get_handle(tk)
                     .or_else(|| e.get_handle(ok))
-                    .map(|h| resolve_player(ctx, h as i64, pk, ck))
+                    .map(|h| resolve_player(ctx, h as i64, pk, ck, &no_clans))
                     .unwrap_or_default();
 
                 for (kind, mode) in trackers {
@@ -2214,6 +2445,9 @@ pub struct Player {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PlayerState {
     pub tick: i32,
+    /// 1-indexed round this snapshot occurred in — see [`Kill::round_num`]'s
+    /// doc comment for the exact lookup rule.
+    pub round_num: Option<i32>,
     pub steamid: Option<u64>,
     pub name: Option<String>,
     /// `"terrorist"` / `"counter-terrorist"` — a static string, so borrowed (no
@@ -2228,6 +2462,9 @@ pub struct PlayerState {
     /// `"BombsiteA"`) — the same per-area names CS2's own radar/HUD show.
     /// Empty until the player's first tick in a named area.
     pub place: Option<String>,
+    /// Team clan name (`m_szClan`, on the controller) — from the demo
+    /// itself, not external match metadata.
+    pub team_clan_name: Option<String>,
     pub pitch: f32,
     pub yaw: f32,
     pub health: i32,
@@ -2241,7 +2478,14 @@ pub struct PlayerState {
     // ── Weapons ──
     /// Short name of the weapon the player is actively holding, if any (follows
     /// `m_hActiveWeapon`). A static weapon name, so borrowed. (Per-shot clip and
-    /// accuracy live on [`Parser::shots`], which reads the weapon's own state.)
+    /// accuracy live on [`Parser::shots`], which reads the weapon's own state --
+    /// tried adding a clip count here too, but `m_iClip1` isn't reliably
+    /// present on a fresh full-packet keyframe until the weapon's been fired
+    /// at least once, which made it disagree between a serial decode and a
+    /// parallel one cold-starting mid-life; reverted rather than ship a
+    /// snapshot field that isn't segmentation-independent. `Parser::shots`
+    /// doesn't have this problem: it only reads the field at a `weapon_fire`
+    /// tick, where firing itself guarantees the field is already present.)
     pub active_weapon: Option<&'static str>,
     /// Short name of the primary-slot weapon (rifle / SMG / shotgun / sniper /
     /// LMG) held, if any. A static weapon name, so borrowed (no allocation).
@@ -2269,6 +2513,8 @@ pub struct PlayerState {
     pub equipment_value_round_start: i32,
     /// The player's cash (`m_pInGameMoneyServices.m_iAccount`).
     pub money: i32,
+    /// Cash spent so far this round (`m_pInGameMoneyServices.m_iCashSpentThisRound`).
+    pub cash_spent_this_round: i32,
     // ── Status ──
     /// Whether the player is fully crouched (`m_pMovementServices.m_bDucked`).
     pub is_crouched: bool,
@@ -2477,7 +2723,17 @@ impl Parser {
         // back to `None` steamid/name, same as before this fix. `keyframe_ticks`
         // is irrelevant with an always-empty cache, so an empty slice is fine.
         let mut identity_cache = HashMap::new();
-        Ok(Self::player_states(&ctx, &keys, &[], &mut identity_cache))
+        // `parse_to_tick` decodes every entity class unfiltered, so CCSTeam
+        // entities (and hence clan names) are already present in `ctx`.
+        let mut clans = HashMap::new();
+        update_clans(&ctx, &TeamKeys::resolve(&ctx), &mut clans);
+        let mut states =
+            Self::player_states(&ctx, &keys, &[], &mut identity_cache, &clans);
+        let anchors = round_num_anchors(&self.rounds()?);
+        for s in &mut states {
+            s.round_num = round_num_for_tick(&anchors, s.tick);
+        }
+        Ok(states)
     }
 
     /// Every player's state at a queried set of ticks, in one decode pass.
@@ -2540,11 +2796,15 @@ impl Parser {
         keyframe_ticks.sort_unstable();
 
         let n = parallel_segment_budget();
-        if n <= 1 {
+        let mut out = if n <= 1 {
             let mut out = Vec::new();
             let mut keys: Option<SnapshotKeys> = None;
             let mut identity_cache = HashMap::new();
+            let mut team_keys: Option<TeamKeys> = None;
+            let mut clans = HashMap::new();
             self.run_to_end_filtered(filter, |ctx| {
+                let tk = team_keys.get_or_insert_with(|| TeamKeys::resolve(ctx));
+                update_clans(ctx, tk, &mut clans);
                 if predicate(ctx.tick()) {
                     let keys = keys.get_or_insert_with(|| SnapshotKeys::resolve(ctx));
                     out.extend(Self::player_states(
@@ -2552,44 +2812,57 @@ impl Parser {
                         keys,
                         &keyframe_ticks,
                         &mut identity_cache,
+                        &clans,
                     ));
                 }
             })?;
-            return Ok(out);
-        }
-
-        let n = n.min(offsets.len().max(1));
-        let segments = segment_ranges(&offsets, n);
-        let (predicate, this, keyframe_ticks) = (&predicate, self, &keyframe_ticks);
-        let parts: Vec<Vec<PlayerState>> = std::thread::scope(|s| {
-            let handles: Vec<_> = segments
-                .iter()
-                .map(|&(seg_start, seg_end)| {
-                    s.spawn(move || -> Result<Vec<PlayerState>> {
-                        let mut out = Vec::new();
-                        let mut keys: Option<SnapshotKeys> = None;
-                        let mut identity_cache = HashMap::new();
-                        this.decode_segment(seg_start, seg_end, filter, |ctx| {
-                            if predicate(ctx.tick()) {
-                                let keys = keys.get_or_insert_with(|| SnapshotKeys::resolve(ctx));
-                                out.extend(Self::player_states(
-                                    ctx,
-                                    keys,
-                                    keyframe_ticks,
-                                    &mut identity_cache,
-                                ));
-                            }
-                        })?;
-                        Ok(out)
+            out
+        } else {
+            let n = n.min(offsets.len().max(1));
+            let segments = segment_ranges(&offsets, n);
+            let (predicate, this, keyframe_ticks) = (&predicate, self, &keyframe_ticks);
+            let parts: Vec<Vec<PlayerState>> = std::thread::scope(|s| {
+                let handles: Vec<_> = segments
+                    .iter()
+                    .map(|&(seg_start, seg_end)| {
+                        s.spawn(move || -> Result<Vec<PlayerState>> {
+                            let mut out = Vec::new();
+                            let mut keys: Option<SnapshotKeys> = None;
+                            let mut identity_cache = HashMap::new();
+                            let mut team_keys: Option<TeamKeys> = None;
+                            let mut clans = HashMap::new();
+                            this.decode_segment(seg_start, seg_end, filter, |ctx| {
+                                let tk = team_keys.get_or_insert_with(|| TeamKeys::resolve(ctx));
+                                update_clans(ctx, tk, &mut clans);
+                                if predicate(ctx.tick()) {
+                                    let keys =
+                                        keys.get_or_insert_with(|| SnapshotKeys::resolve(ctx));
+                                    out.extend(Self::player_states(
+                                        ctx,
+                                        keys,
+                                        keyframe_ticks,
+                                        &mut identity_cache,
+                                        &clans,
+                                    ));
+                                }
+                            })?;
+                            Ok(out)
+                        })
                     })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("snapshot segment panicked"))
-                .collect::<Result<Vec<_>>>()
-        })?;
-        Ok(parts.into_iter().flatten().collect())
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("snapshot segment panicked"))
+                    .collect::<Result<Vec<_>>>()
+            })?;
+            parts.into_iter().flatten().collect()
+        };
+
+        let anchors = round_num_anchors(&self.rounds()?);
+        for s in &mut out {
+            s.round_num = round_num_for_tick(&anchors, s.tick);
+        }
+        Ok(out)
     }
 
     /// Per-team economy and buy type for each round.
@@ -2705,6 +2978,7 @@ impl Parser {
         keys: &SnapshotKeys,
         keyframe_ticks: &[i32],
         identity_cache: &mut HashMap<(i32, u32, i32), (Option<u64>, Option<String>)>,
+        clans: &HashMap<i64, String>,
     ) -> Vec<PlayerState> {
         let (pk, ck) = (&keys.pawn, &keys.ctrl);
         // The latest keyframe at or before this tick (`i32::MIN` if this tick
@@ -2772,6 +3046,7 @@ impl Parser {
                 continue;
             }
             state.side = Some(team_name(team));
+            state.team_clan_name = clans.get(&team).cloned();
             let pawn_key = (pawn.index, pawn.serial, bucket);
             if let Some(ctrl) = pawn
                 .get_handle(pk.controller)
@@ -2781,6 +3056,7 @@ impl Parser {
                 state.name = ctrl.get_string(ck.name);
                 state.money = ctrl.get_i64(ck.money) as i32;
                 state.ping = ctrl.get_u64(keys.ping).map(|p| p as i32);
+                state.cash_spent_this_round = ctrl.get_i64(ck.cash_spent_this_round) as i32;
                 if state.steamid.is_some() {
                     identity_cache.insert(pawn_key, (state.steamid, state.name.clone()));
                 }
@@ -2898,6 +3174,9 @@ impl Parser {
         let mut count_key: Option<Option<u64>> = None;
         let mut slot_keys: Option<Vec<Option<u64>>> = None;
         let mut out: Vec<ItemEvent> = Vec::new();
+        // ItemEvent doesn't carry team_clan_name (not part of its schema) --
+        // an always-empty map is a cheap, correct no-op for the clans lookup.
+        let no_clans: HashMap<i64, String> = HashMap::new();
 
         let filter = snapshot_filter();
         self.run_to_end_filtered(&filter, |ctx| {
@@ -2939,7 +3218,7 @@ impl Parser {
                 if !pawn.active || pawn.class_name.as_ref() != PLAYER_PAWN_CLASS {
                     continue;
                 }
-                let actor = resolve_from_pawn(ctx, pawn, pkr, ckr);
+                let actor = resolve_from_pawn(ctx, pawn, pkr, ckr, &no_clans);
 
                 // Current inventory: the live `m_hMyWeapons` handles.
                 let count = (pawn.get_i64(ckey) as usize).min(skeys.len());
@@ -3131,6 +3410,36 @@ mod tests {
         assert_eq!(dmg.dmg_health, 444); // raw damage is preserved
         assert_eq!(dmg.health_post, 0);
         assert_eq!(dmg.health_pre, 100); // clamped, not 444
+    }
+
+    fn round(round_num: i32, start_tick: Option<i32>, end_tick: i32) -> Round {
+        Round {
+            round_num,
+            start_tick,
+            end_tick,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn round_num_for_tick_picks_the_latest_anchor_at_or_before() {
+        let rounds = [round(1, Some(0), 1000), round(2, Some(1100), 2000), round(3, Some(2100), 3000)];
+        let anchors = round_num_anchors(&rounds);
+        assert_eq!(round_num_for_tick(&anchors, 0), Some(1));
+        assert_eq!(round_num_for_tick(&anchors, 500), Some(1));
+        assert_eq!(round_num_for_tick(&anchors, 1100), Some(2)); // exactly at round 2's start
+        assert_eq!(round_num_for_tick(&anchors, 1050), Some(1)); // post-round-1, pre-round-2
+        assert_eq!(round_num_for_tick(&anchors, 5000), Some(3)); // past the last round's start
+        assert_eq!(round_num_for_tick(&anchors, -1), None); // before any round started
+    }
+
+    #[test]
+    fn round_num_anchors_falls_back_when_start_tick_unknown() {
+        // A demo that starts mid-round has no start_tick for round 1 -- the
+        // anchor falls back to end_tick (the only boundary that's always known).
+        let rounds = [round(1, None, 900)];
+        let anchors = round_num_anchors(&rounds);
+        assert_eq!(anchors, vec![(900, 1)]);
     }
 
     fn kill(tick: i32, attacker: u64, aside: &str, victim: u64, vside: &str) -> Kill {

@@ -1658,18 +1658,33 @@ fn kills_to_frame(kills: &[Kill]) -> PolarsResult<DataFrame> {
         col!("attacker_x", kills, |k| k.attacker_x),
         col!("attacker_y", kills, |k| k.attacker_y),
         col!("attacker_z", kills, |k| k.attacker_z),
+        col!("attacker_team_clan_name", kills, |k| k
+            .attacker_team_clan_name
+            .clone()),
+        col!("attacker_cash_spent_this_round", kills, |k| k
+            .attacker_cash_spent_this_round),
         col!("victim_steamid", kills, |k| k.victim_steamid),
         col!("victim_name", kills, |k| k.victim_name.clone()),
         col!("victim_side", kills, |k| k.victim_side.clone()),
         col!("victim_x", kills, |k| k.victim_x),
         col!("victim_y", kills, |k| k.victim_y),
         col!("victim_z", kills, |k| k.victim_z),
+        col!("victim_team_clan_name", kills, |k| k
+            .victim_team_clan_name
+            .clone()),
+        col!("victim_cash_spent_this_round", kills, |k| k
+            .victim_cash_spent_this_round),
         col!("assister_steamid", kills, |k| k.assister_steamid),
         col!("assister_name", kills, |k| k.assister_name.clone()),
         col!("assister_side", kills, |k| k.assister_side.clone()),
         col!("assister_x", kills, |k| k.assister_x),
         col!("assister_y", kills, |k| k.assister_y),
         col!("assister_z", kills, |k| k.assister_z),
+        col!("assister_team_clan_name", kills, |k| k
+            .assister_team_clan_name
+            .clone()),
+        col!("assister_cash_spent_this_round", kills, |k| k
+            .assister_cash_spent_this_round),
         col!("weapon", kills, |k| k.weapon.clone()),
         col!("headshot", kills, |k| k.headshot),
         col!("assist_flash", kills, |k| k.assist_flash),
@@ -1685,6 +1700,7 @@ fn kills_to_frame(kills: &[Kill]) -> PolarsResult<DataFrame> {
         col!("hitgroup_name", kills, |k| k.hitgroup_name.clone()),
         col!("is_trade", kills, |k| k.is_trade),
         col!("victim_traded", kills, |k| k.victim_traded),
+        col!("round_num", kills, |k| k.round_num),
         col!("tick", kills, |k| k.tick),
     ])
 }
@@ -1697,21 +1713,33 @@ fn damages_to_frame(damages: &[Damage]) -> PolarsResult<DataFrame> {
         col!("attacker_x", damages, |d| d.attacker_x),
         col!("attacker_y", damages, |d| d.attacker_y),
         col!("attacker_z", damages, |d| d.attacker_z),
+        col!("attacker_team_clan_name", damages, |d| d
+            .attacker_team_clan_name
+            .clone()),
+        col!("attacker_cash_spent_this_round", damages, |d| d
+            .attacker_cash_spent_this_round),
         col!("victim_steamid", damages, |d| d.victim_steamid),
         col!("victim_name", damages, |d| d.victim_name.clone()),
         col!("victim_side", damages, |d| d.victim_side.clone()),
         col!("victim_x", damages, |d| d.victim_x),
         col!("victim_y", damages, |d| d.victim_y),
         col!("victim_z", damages, |d| d.victim_z),
+        col!("victim_team_clan_name", damages, |d| d
+            .victim_team_clan_name
+            .clone()),
+        col!("victim_cash_spent_this_round", damages, |d| d
+            .victim_cash_spent_this_round),
         col!("weapon", damages, |d| d.weapon.clone()),
         col!("dmg_health", damages, |d| d.dmg_health),
         col!("dmg_armor", damages, |d| d.dmg_armor),
+        col!("dmg_health_real", damages, |d| d.dmg_health_real),
         col!("hitgroup", damages, |d| d.hitgroup),
         col!("hitgroup_name", damages, |d| d.hitgroup_name.clone()),
         col!("health_pre", damages, |d| d.health_pre),
         col!("health_post", damages, |d| d.health_post),
         col!("armor_pre", damages, |d| d.armor_pre),
         col!("armor_post", damages, |d| d.armor_post),
+        col!("round_num", damages, |d| d.round_num),
         col!("tick", damages, |d| d.tick),
     ])
 }
@@ -1794,12 +1822,16 @@ fn smokes_to_frame(smokes: &[Smoke]) -> PolarsResult<DataFrame> {
 fn shots_to_frame(shots: &[Shot]) -> PolarsResult<DataFrame> {
     df_from_columns(vec![
         col!("tick", shots, |s| s.tick),
+        col!("round_num", shots, |s| s.round_num),
         col!("steamid", shots, |s| s.steamid),
         col!("name", shots, |s| s.name.clone()),
         col!("side", shots, |s| s.side.clone()),
         col!("x", shots, |s| s.x),
         col!("y", shots, |s| s.y),
         col!("z", shots, |s| s.z),
+        col!("team_clan_name", shots, |s| s.team_clan_name.clone()),
+        col!("cash_spent_this_round", shots, |s| s
+            .cash_spent_this_round),
         col!("pitch", shots, |s| s.pitch),
         col!("yaw", shots, |s| s.yaw),
         col!("weapon", shots, |s| s.weapon.clone()),
@@ -1821,6 +1853,7 @@ fn players_to_frame(players: &[Player]) -> PolarsResult<DataFrame> {
 fn states_to_frame(states: &[PlayerState]) -> PolarsResult<DataFrame> {
     df_from_columns(vec![
         col!("tick", states, |s| s.tick),
+        col!("round_num", states, |s| s.round_num),
         col!("steamid", states, |s| s.steamid),
         col!("name", states, |s| s.name.clone()),
         col!("side", states, |s| s.side),
@@ -1829,6 +1862,7 @@ fn states_to_frame(states: &[PlayerState]) -> PolarsResult<DataFrame> {
         col!("y", states, |s| s.y),
         col!("z", states, |s| s.z),
         col!("place", states, |s| s.place.clone()),
+        col!("team_clan_name", states, |s| s.team_clan_name.clone()),
         col!("pitch", states, |s| s.pitch),
         col!("yaw", states, |s| s.yaw),
         col!("health", states, |s| s.health),
@@ -1848,6 +1882,8 @@ fn states_to_frame(states: &[PlayerState]) -> PolarsResult<DataFrame> {
         col!("equipment_value_round_start", states, |s| s
             .equipment_value_round_start),
         col!("money", states, |s| s.money),
+        col!("cash_spent_this_round", states, |s| s
+            .cash_spent_this_round),
         col!("is_crouched", states, |s| s.is_crouched),
         col!("is_walking", states, |s| s.is_walking),
         col!("is_jumping", states, |s| s.is_jumping),

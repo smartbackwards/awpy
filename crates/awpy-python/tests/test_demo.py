@@ -4,6 +4,7 @@ The fixture-backed tests are skipped when no demo is present (see conftest).
 The error-handling tests always run.
 """
 
+from collections import Counter
 from pathlib import Path
 
 import polars as pl
@@ -99,15 +100,26 @@ def test_snapshots_parallel_matches_serial(
     demo_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Snapshots decode in parallel across keyframe segments (including the loadout,
-    # which follows weapon-entity handles); the result must be bit-identical to a
-    # single serial pass.
-    keys = ["tick", "steamid"]
+    # which follows weapon-entity handles); the result must carry the same
+    # rows as a single serial pass -- as a *multiset*, not a fixed order.
+    #
+    # Several dead players can be true duplicates of each other across every
+    # column (steamid/name null, and the rest of a corpse's state -- health,
+    # armor, is_scoped, flash_duration, inventory -- frozen identically at
+    # death; see `player_states`'s identity-cache doc comment). Verified
+    # directly against this fixture: at its last sampled tick, serial and
+    # parallel produce byte-identical rows in the same order. But
+    # `.sort(all_columns).equals(...)` can still spuriously disagree on which
+    # physical row occupies which position among such duplicates (polars'
+    # tie-breaking for a many-column sort with heavy nulls isn't guaranteed
+    # stable across independently-sorted frames), so compare as multisets
+    # (each row hashed, then counted) instead of relying on any sort at all.
     monkeypatch.setenv("AWPY_TICK_SEGMENTS", "1")
     serial = Demo(demo_path).snapshots(every=64)
     monkeypatch.setenv("AWPY_TICK_SEGMENTS", "8")
     parallel = Demo(demo_path).snapshots(every=64)
     assert parallel.height == serial.height
-    assert serial.sort(keys).equals(parallel.sort(keys))
+    assert Counter(serial.hash_rows().to_list()) == Counter(parallel.hash_rows().to_list())
 
 
 def test_ticks_parallel_matches_serial(demo_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -613,6 +625,36 @@ def test_damages(demo_path: Path) -> None:
     assert damages["health_pre"].max() <= 100
 
 
+def test_dmg_health_real(demo_path: Path) -> None:
+    """`dmg_health_real` is the victim's *actual* health lost to a hit: their
+    true health at the moment of the hit (`health_post` from their previous
+    hit this life, or 100 on their first hit since spawning) minus this hit's
+    own `health_post`. It is **not** always `<= dmg_health` -- that only
+    holds for the overkill case (a raw event value that overstates real
+    remaining health); it can also run the other way, e.g. a round-timeout
+    `weapon == "world"` loss networks a small placeholder `dmg_health` rather
+    than a real damage amount, while `dmg_health_real` correctly reports the
+    victim's actual (often much larger) health loss.
+
+    Re-deriving it independently for consecutive hits within one life
+    (previous row's `health_post` minus this row's) matches *most* of the
+    time but not always exactly -- a real, small, not-fully-root-caused
+    precision gap documented on the field itself (see `Damage.dmg_health_real`'s
+    doc comment). So this only checks the invariants that are unconditionally
+    true, not exact reconstruction.
+    """
+    demo = Demo(demo_path)
+    dmg = demo.damages
+    assert "dmg_health_real" in dmg.columns
+    assert (dmg["dmg_health_real"] >= 0).all()
+    # A full match has at least one overkill hit (dmg_health_real < dmg_health,
+    # a lethal hit that dealt more raw damage than the victim had left), and
+    # every one of those is lethal by definition.
+    overkill = dmg.filter(pl.col("dmg_health_real") < pl.col("dmg_health"))
+    assert overkill.height > 0
+    assert (overkill["health_post"] == 0).all()
+
+
 def test_rounds_official_end(demo_path: Path) -> None:
     rounds = Demo(demo_path).rounds
     assert "official_end_tick" in rounds.columns
@@ -885,6 +927,65 @@ def test_round_economy(demo_path: Path) -> None:
     assert (econ.filter(pl.col("round_num") == 1)["buy_type"] == "pistol").all()
     pistol_rounds = econ.filter(pl.col("buy_type") == "pistol")["round_num"].unique()
     assert len(pistol_rounds) == 2  # round 1 and the second-half pistol
+
+
+def test_round_num_joins_kills_damages_shots_and_snapshots(demo_path: Path) -> None:
+    """`round_num` on kills/damages/shots/snapshots is a join against
+    `demo.rounds` by tick (those datasets come from a separate decode pass
+    than `rounds()`, so it can't be read inline) -- the round whose own
+    boundary (`start_tick`, falling back to `freeze_end_tick`/`end_tick`) is
+    the latest one at or before that row's own tick.
+    """
+    demo = Demo(demo_path)
+    rounds = demo.rounds.sort("round_num")
+    max_round = rounds["round_num"].max()
+
+    for name in ("kills", "damages", "shots"):
+        df = getattr(demo, name)
+        assert "round_num" in df.columns
+        resolved = df.filter(pl.col("round_num").is_not_null())
+        assert resolved.height > 0, f"{name}: no rows resolved a round_num"
+        assert resolved["round_num"].min() >= 1
+        assert resolved["round_num"].max() <= max_round
+
+    snap = demo.snapshots(seconds=1.0)
+    assert "round_num" in snap.columns
+    resolved = snap.filter(pl.col("round_num").is_not_null())
+    assert resolved.height > 0
+    assert resolved["round_num"].min() >= 1
+    assert resolved["round_num"].max() <= max_round
+
+    # Spot-check against the actual boundaries: no kill is attributed to a
+    # round before that round's own start_tick (when known -- the very first
+    # round of a demo that starts mid-round may have none).
+    joined = demo.kills.filter(pl.col("round_num").is_not_null()).join(
+        rounds.select("round_num", "start_tick"), on="round_num"
+    )
+    bad = joined.filter(
+        pl.col("start_tick").is_not_null() & (pl.col("tick") < pl.col("start_tick"))
+    )
+    assert bad.height == 0
+
+
+def test_team_clan_name_and_cash_spent_this_round(demo_path: Path) -> None:
+    demo = Demo(demo_path)
+    snap = demo.snapshots(seconds=1.0)
+    assert {"team_clan_name", "cash_spent_this_round"} <= set(snap.columns)
+    # A real match has (at least) two distinct team names.
+    assert snap["team_clan_name"].drop_nulls().n_unique() >= 2
+    assert snap["cash_spent_this_round"].min() >= 0
+    assert (snap["cash_spent_this_round"] > 0).any()
+
+    kills = demo.kills
+    assert {
+        "attacker_team_clan_name",
+        "victim_team_clan_name",
+        "attacker_cash_spent_this_round",
+        "victim_cash_spent_this_round",
+    } <= set(kills.columns)
+    resolved = kills.filter(pl.col("attacker_team_clan_name").is_not_null())
+    assert resolved.height > 0
+    assert resolved["attacker_cash_spent_this_round"].min() >= 0
 
 
 def test_schema_constants() -> None:

@@ -15,10 +15,12 @@ __all__ = ["GAME_EVENTS", "SNAPSHOT_PROPERTIES"]
 
 SNAPSHOT_PROPERTIES: dict[str, str] = {
     # ── Identity ──
+    "round_num": "joined from Demo.rounds by tick, not a network property",
     "steamid": "m_steamID",
     "name": "m_iszPlayerName",
     "side": "m_iTeamNum",  # 2 = terrorist, 3 = counter-terrorist
     "ping": "m_iPing",  # on the controller, not the pawn
+    "team_clan_name": "m_szClan",  # on the controller; the demo's own broadcast-overlay team name
     # ── Position & aim (world coordinates, Hammer units) ──
     "x": "CBodyComponent.m_cellX + m_vecX (computed)",
     "y": "CBodyComponent.m_cellY + m_vecY (computed)",
@@ -46,6 +48,7 @@ SNAPSHOT_PROPERTIES: dict[str, str] = {
     "equipment_value": "m_unCurrentEquipmentValue",
     "equipment_value_round_start": "m_unRoundStartEquipmentValue",
     "money": "m_pInGameMoneyServices.m_iAccount",
+    "cash_spent_this_round": "m_pInGameMoneyServices.m_iCashSpentThisRound",
     # ── Status ──
     "is_crouched": "m_pMovementServices.m_bDucked",
     "is_walking": "m_bIsWalking",
