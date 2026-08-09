@@ -278,6 +278,18 @@ pub struct Kill {
     pub penetrated: i32,
     pub revenge: i32,
     pub thrusmoke: bool,
+    /// Whether the attacker was blinded at the moment of the kill.
+    pub attacker_blind: bool,
+    /// Whether the attacker was airborne (mid-jump) at the moment of the kill.
+    pub attacker_in_air: bool,
+    /// Distance between attacker and victim at the kill, in **meters**
+    /// (confirmed empirically: ~39.37x smaller than the geometric distance
+    /// between `attacker_*`/`victim_*`, which are in Hammer units/inches —
+    /// that ratio is exactly inches-per-meter) — the server's own value, not
+    /// derived from position. `0.0` on `weapon == "world"` kills (self/
+    /// environment deaths), where the server has no attacker-victim pair to
+    /// measure.
+    pub distance: f32,
     pub hitgroup: i32,
     pub hitgroup_name: String,
 
@@ -701,6 +713,9 @@ fn kill_event_fields(e: &GameEvent) -> Kill {
         penetrated: k.i32("penetrated"),
         revenge: k.i32("revenge"),
         thrusmoke: k.bool("thrusmoke"),
+        attacker_blind: k.bool("attackerblind"),
+        attacker_in_air: k.bool("attackerinair"),
+        distance: k.f32("distance").unwrap_or(0.0),
         hitgroup,
         hitgroup_name: hitgroup_name(hitgroup as i64).to_string(),
         ..Default::default()
@@ -887,6 +902,15 @@ struct SnapshotKeys {
     active_weapon: Option<u64>,
     weapon_count: Option<u64>,
     weapons: Vec<Option<u64>>,
+    /// Named callout location (`m_szLastPlaceName`, e.g. `"TSpawn"`, `"Mid"`).
+    place: Option<u64>,
+    /// Network ping in milliseconds (`m_iPing`, on the *controller*, not the
+    /// pawn — resolved against `ctrl`'s serializer, like `CtrlKeys`' own
+    /// fields, but kept here rather than added to `CtrlKeys` since ping is
+    /// only meaningful for a live snapshot, not `ResolvedPlayer`'s other
+    /// callers (kills / damages / blinds resolve a moment in the past, where
+    /// "current ping" doesn't apply).
+    ping: Option<u64>,
     /// Manually-addressed `m_pWeaponServices.m_iAmmo[14]` — flashbang reserve
     /// ammo, the true 0/1/2 held-count (see `fill_loadout`'s doc comment).
     /// `resolve_field_key` can resolve the *bare* `m_iAmmo` path fine (a
@@ -933,6 +957,11 @@ impl SnapshotKeys {
             weapons: (0..MAX_INVENTORY)
                 .map(|i| key(&format!("m_pWeaponServices.m_hMyWeapons.{i}")))
                 .collect(),
+            place: key("m_szLastPlaceName"),
+            ping: ctx
+                .serializers()
+                .get(PLAYER_CONTROLLER_CLASS)
+                .and_then(|s| s.resolve_field_key("m_iPing")),
             flashbang_ammo_key: key("m_pWeaponServices.m_iAmmo").map(|base| {
                 let base_fp = FieldPath::unpack(base);
                 let mut fp = FieldPath::default();
@@ -2190,9 +2219,15 @@ pub struct PlayerState {
     /// `"terrorist"` / `"counter-terrorist"` — a static string, so borrowed (no
     /// per-tick allocation).
     pub side: Option<&'static str>,
+    /// Network ping in milliseconds (`m_iPing`, on the controller).
+    pub ping: Option<i32>,
     pub x: Option<f32>,
     pub y: Option<f32>,
     pub z: Option<f32>,
+    /// Named callout location (`m_szLastPlaceName`, e.g. `"TSpawn"`, `"Mid"`,
+    /// `"BombsiteA"`) — the same per-area names CS2's own radar/HUD show.
+    /// Empty until the player's first tick in a named area.
+    pub place: Option<String>,
     pub pitch: f32,
     pub yaw: f32,
     pub health: i32,
@@ -2251,7 +2286,9 @@ pub struct PlayerState {
     /// Seconds of blindness remaining (`m_flFlashDuration`); 0 when not blinded.
     pub flash_duration: f32,
     /// Comma-separated short names of every weapon in the loadout, in slot
-    /// order (e.g. `ak47,deagle,knife,hegrenade,flashbang,flashbang`).
+    /// order (e.g. `ak47,deagle,knife,hegrenade,flashbang`). One entry per
+    /// weapon *entity* — a double flashbang hold still lists `flashbang`
+    /// once; see `flashbangs` for the true held count.
     pub inventory: String,
 }
 
@@ -2630,6 +2667,7 @@ impl Parser {
                 let [x, y, z] = pawn.world_position(pk.cell, pk.offset);
                 (state.x, state.y, state.z) = (Some(x), Some(y), Some(z));
             }
+            state.place = pawn.get_string(keys.place);
             let angles = pawn.get_qangle(keys.angles);
             state.pitch = angles[0];
             state.yaw = angles[1];
@@ -2680,6 +2718,7 @@ impl Parser {
                 state.steamid = ctrl.get_u64(ck.steamid);
                 state.name = ctrl.get_string(ck.name);
                 state.money = ctrl.get_i64(ck.money) as i32;
+                state.ping = ctrl.get_u64(keys.ping).map(|p| p as i32);
             }
             out.push(state);
         }

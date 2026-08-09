@@ -363,6 +363,10 @@ impl Demo {
     /// :attr:`stats` tallies as ``traded_deaths``, from the same classifier, so
     /// they cannot disagree. Their totals differ, though: one kill can avenge
     /// several teammates at once, so ``victim_traded`` is usually more common.
+    ///
+    /// Also carries ``attacker_blind`` / ``attacker_in_air`` / ``distance`` —
+    /// read directly from ``player_death``'s own fields (the server's own
+    /// determination), not derived.
     #[getter]
     fn kills(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.event_frame(py, "kills")
@@ -1674,6 +1678,9 @@ fn kills_to_frame(kills: &[Kill]) -> PolarsResult<DataFrame> {
         col!("penetrated", kills, |k| k.penetrated),
         col!("revenge", kills, |k| k.revenge),
         col!("thrusmoke", kills, |k| k.thrusmoke),
+        col!("attacker_blind", kills, |k| k.attacker_blind),
+        col!("attacker_in_air", kills, |k| k.attacker_in_air),
+        col!("distance", kills, |k| k.distance),
         col!("hitgroup", kills, |k| k.hitgroup),
         col!("hitgroup_name", kills, |k| k.hitgroup_name.clone()),
         col!("is_trade", kills, |k| k.is_trade),
@@ -1817,9 +1824,11 @@ fn states_to_frame(states: &[PlayerState]) -> PolarsResult<DataFrame> {
         col!("steamid", states, |s| s.steamid),
         col!("name", states, |s| s.name.clone()),
         col!("side", states, |s| s.side),
+        col!("ping", states, |s| s.ping),
         col!("x", states, |s| s.x),
         col!("y", states, |s| s.y),
         col!("z", states, |s| s.z),
+        col!("place", states, |s| s.place.clone()),
         col!("pitch", states, |s| s.pitch),
         col!("yaw", states, |s| s.yaw),
         col!("health", states, |s| s.health),

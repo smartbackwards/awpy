@@ -57,8 +57,14 @@ For each of `attacker`, `victim`, `assister`:
 | `<who>_x` / `_y` / `_z` | f32? | World position (Hammer units) at the kill tick. |
 
 Plus the kill's own fields: `weapon` (str), `headshot` (bool), `dominated`,
-`noscope` (bool), `penetrated`, `revenge`, `thrusmoke` (bool), `hitgroup`,
-`hitgroup_name`, `is_trade` (bool), `victim_traded` (bool), and `tick`.
+`noscope` (bool), `penetrated`, `revenge`, `thrusmoke` (bool), `attacker_blind`
+(bool — attacker was blinded at the moment of the kill), `attacker_in_air`
+(bool), `distance` (f32 — attacker-to-victim distance **in meters**, not
+Hammer units; `0.0` on `weapon == "world"` kills, which have no attacker to
+measure from), `hitgroup`, `hitgroup_name`, `is_trade` (bool),
+`victim_traded` (bool), and `tick`. `attacker_blind` / `attacker_in_air` /
+`distance` are read directly from `player_death`'s own event fields (the
+server's own determination), not derived from entity state.
 
 Participant columns are **null** when that participant is absent (no assister)
 or can't be resolved (e.g. a world kill).
@@ -500,6 +506,8 @@ range; combined with a sampler, they bound it. At least one must be given.
 
 | Column | Type | Description |
 | --- | --- | --- |
+| `ping` | i32? | Network ping in milliseconds (`m_iPing`, from the controller). |
+| `place` | str? | Named callout location (`m_szLastPlaceName`, e.g. `TSpawn`, `Mid`, `BombsiteA`) — the same per-area names CS2's own radar/HUD show. |
 | `health` | i32 | Hit points. |
 | `armor` | i32 | Armor value. |
 | `has_helmet` | bool | Kevlar + helmet. |
@@ -523,7 +531,7 @@ range; combined with a sampler, they bound it. At least one must be given.
 | `is_scoped` | bool | Scoped in. |
 | `is_defusing` | bool | Defusing the bomb. |
 | `flash_duration` | f32 | Seconds of blindness remaining (0 if not blinded). |
-| `inventory` | str | Comma-separated short names of every weapon in the loadout, in slot order (e.g. `ak47,deagle,knife,flashbang,flashbang,smokegrenade`). |
+| `inventory` | str | Comma-separated short names of every weapon in the loadout, in slot order (e.g. `ak47,deagle,knife,flashbang,smokegrenade`). One entry per weapon *entity* — a double flashbang hold still lists `flashbang` once; see `flashbangs` for the true held count. |
 
 Each column and the CS2 engine property it comes from is listed in the
 {doc}`Reference <reference>` (also `awpy.SNAPSHOT_PROPERTIES`). Weapon names match

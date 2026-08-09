@@ -18,10 +18,12 @@ SNAPSHOT_PROPERTIES: dict[str, str] = {
     "steamid": "m_steamID",
     "name": "m_iszPlayerName",
     "side": "m_iTeamNum",  # 2 = terrorist, 3 = counter-terrorist
+    "ping": "m_iPing",  # on the controller, not the pawn
     # ── Position & aim (world coordinates, Hammer units) ──
     "x": "CBodyComponent.m_cellX + m_vecX (computed)",
     "y": "CBodyComponent.m_cellY + m_vecY (computed)",
     "z": "CBodyComponent.m_cellZ + m_vecZ (computed)",
+    "place": "m_szLastPlaceName",  # named callout, e.g. "TSpawn", "Mid"
     "pitch": "m_angEyeAngles[0]",
     "yaw": "m_angEyeAngles[1]",
     # ── Health & armor ──

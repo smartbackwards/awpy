@@ -292,6 +292,29 @@ def test_snapshot_economy(demo_path: Path) -> None:
     assert (snap["inventory"].str.count_matches("c4") <= 1).all()
 
 
+def test_snapshot_place_and_ping(demo_path: Path) -> None:
+    """``place`` (``m_szLastPlaceName``) and ``ping`` (``m_iPing``, read off
+    the controller, not the pawn) are both present on every snapshot row.
+
+    ``ping`` reads a constant ``0`` on LAN-recorded demos (the fixture this
+    was validated against is a LAN event) -- that's expected, not a
+    GOTV-stripped-field artifact like some other fields in this codebase;
+    it isn't asserted non-zero here since a LAN fixture legitimately has
+    near-zero ping.
+    """
+    demo = Demo(demo_path)
+    snap = demo.snapshots(seconds=1.0)
+    assert {"place", "ping"} <= set(snap.columns)
+    assert snap["ping"].dtype == pl.Int32
+    assert snap["place"].dtype == pl.String
+    assert snap["ping"].min() >= 0
+    # Named callouts appear once players have moved past spawn -- `place` is
+    # `""` (not null) before a player's first tick in a named area, so a real
+    # match has both `""` early on and multiple real callouts thereafter.
+    places = set(snap["place"].drop_nulls().unique().to_list())
+    assert len(places - {""}) > 1
+
+
 def test_flashbangs_reaches_two(demo_path: Path) -> None:
     """CS2 lets a player hold 2 flashbangs -- the one grenade type that isn't
     capped at 1. `flashbangs` is read from the pawn's own
@@ -501,6 +524,37 @@ def test_kills(demo_path: Path) -> None:
     # Sides are terrorist / counter-terrorist (or null for world kills).
     sides = set(kills["attacker_side"].drop_nulls().unique())
     assert sides <= {"terrorist", "counter-terrorist"}
+
+
+def test_kill_event_fields(demo_path: Path) -> None:
+    """``attacker_blind`` / ``attacker_in_air`` / ``distance`` are read
+    directly off `player_death`'s own event keys (the server's own
+    determination), not derived from entity state.
+    """
+    demo = Demo(demo_path)
+    kills = demo.kills
+    assert {"attacker_blind", "attacker_in_air", "distance"} <= set(kills.columns)
+    assert kills["attacker_blind"].dtype == pl.Boolean
+    assert kills["attacker_in_air"].dtype == pl.Boolean
+    assert kills["distance"].dtype == pl.Float32
+    # A full match has at least one blind kill (flash-into-peek is common).
+    assert kills["attacker_blind"].any()
+    # `distance` is in meters, not Hammer units -- roughly 39.37x smaller than
+    # the geometric distance between attacker_*/victim_* (which are in
+    # Hammer units/inches; 39.37 is exactly inches-per-meter).
+    non_world = kills.filter(pl.col("attacker_steamid").is_not_null() & (pl.col("distance") > 0))
+    geo_dist = (
+        (pl.col("attacker_x") - pl.col("victim_x")) ** 2
+        + (pl.col("attacker_y") - pl.col("victim_y")) ** 2
+        + (pl.col("attacker_z") - pl.col("victim_z")) ** 2
+    ).sqrt()
+    ratio = non_world.select((geo_dist / pl.col("distance")).alias("ratio"))["ratio"]
+    assert (ratio - 39.37).abs().max() < 2.0
+    # `weapon == "world"` kills (self/environment deaths) have no
+    # attacker-victim pair for the server to measure a distance from.
+    world = kills.filter(pl.col("weapon") == "world")
+    if world.height:
+        assert (world["distance"] == 0.0).all()
 
 
 def test_damages(demo_path: Path) -> None:
