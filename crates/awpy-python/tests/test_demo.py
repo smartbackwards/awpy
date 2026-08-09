@@ -315,6 +315,35 @@ def test_snapshot_place_and_ping(demo_path: Path) -> None:
     assert len(places - {""}) > 1
 
 
+def test_dead_players_keep_identity(demo_path: Path) -> None:
+    """CS2 explicitly invalidates a pawn's `m_hController` back-link once the
+    controller hands off to a fresh observer pawn on death -- the corpse
+    itself keeps position/team/health, just not the link back to who it was.
+    `player_states` caches each pawn's last-known identity (keyed by its own
+    entity index+serial) while the link is live, and falls back to it once
+    the link goes invalid -- so most dead-player rows keep their steamid/name
+    instead of going null.
+
+    Not a 100% guarantee: the cache resets at every full-packet keyframe (a
+    boundary intrinsic to the demo, not to how many segments it's decoded in
+    -- needed so parallel decoding stays bit-identical to a serial pass, see
+    `collect_states`'s doc comment), so a player already dead at the start of
+    a keyframe interval has no earlier live tick in that interval to have
+    seeded it from. That trades away some resolution rate for a real
+    correctness guarantee (resetting on segment boundaries instead, which are
+    coarser but segment-count-dependent, resolved ~90% on this fixture but
+    broke serial/parallel equivalence) -- hence a generous floor here, well
+    below what's typically observed (~60%+ on the fixture this was tuned
+    against), rather than a tight bound tied to one demo's keyframe spacing.
+    """
+    demo = Demo(demo_path)
+    snap = demo.snapshots(seconds=1.0)
+    dead = snap.filter(pl.col("health") == 0)
+    assert dead.height > 0, "a full match always has dead-player rows"
+    resolved = dead.filter(pl.col("steamid").is_not_null())
+    assert resolved.height / dead.height > 0.3
+
+
 def test_flashbangs_reaches_two(demo_path: Path) -> None:
     """CS2 lets a player hold 2 flashbangs -- the one grenade type that isn't
     capped at 1. `flashbangs` is read from the pawn's own

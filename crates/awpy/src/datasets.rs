@@ -2471,7 +2471,13 @@ impl Parser {
     pub fn snapshot(&self, tick: i32) -> Result<Vec<PlayerState>> {
         let ctx = self.parse_to_tick(tick)?;
         let keys = SnapshotKeys::resolve(&ctx);
-        Ok(Self::player_states(&ctx, &keys))
+        // A single-tick query has no earlier ticks of its own to have cached
+        // a dead pawn's identity from (see `player_states`'s doc comment) --
+        // a fresh, empty cache here means dead players on this one tick fall
+        // back to `None` steamid/name, same as before this fix. `keyframe_ticks`
+        // is irrelevant with an always-empty cache, so an empty slice is fine.
+        let mut identity_cache = HashMap::new();
+        Ok(Self::player_states(&ctx, &keys, &[], &mut identity_cache))
     }
 
     /// Every player's state at a queried set of ticks, in one decode pass.
@@ -2517,28 +2523,44 @@ impl Parser {
     /// single serial pass when parallelism is disabled) — player pawn/controller
     /// state is re-keyframed at every full packet, so the per-segment cold
     /// restarts stitch back into the same result as a serial pass.
+    ///
+    /// That equivalence has to hold for the dead-pawn identity cache too (see
+    /// `player_states`), so its cache key is scoped to "since the most recent
+    /// keyframe at or before this tick" rather than "since the decode started"
+    /// — a demo-intrinsic boundary (`keyframe_ticks`, shared by both branches
+    /// below) that segment count can never change, since `segment_ranges`
+    /// only ever splits at those same keyframes and never mid-interval.
     fn collect_states(
         &self,
         filter: &HashSet<&str>,
         predicate: impl Fn(i32) -> bool + Sync,
     ) -> Result<Vec<PlayerState>> {
+        let offsets = self.full_packet_offsets()?;
+        let mut keyframe_ticks: Vec<i32> = offsets.iter().map(|&(_, t)| t).collect();
+        keyframe_ticks.sort_unstable();
+
         let n = parallel_segment_budget();
         if n <= 1 {
             let mut out = Vec::new();
             let mut keys: Option<SnapshotKeys> = None;
+            let mut identity_cache = HashMap::new();
             self.run_to_end_filtered(filter, |ctx| {
                 if predicate(ctx.tick()) {
                     let keys = keys.get_or_insert_with(|| SnapshotKeys::resolve(ctx));
-                    out.extend(Self::player_states(ctx, keys));
+                    out.extend(Self::player_states(
+                        ctx,
+                        keys,
+                        &keyframe_ticks,
+                        &mut identity_cache,
+                    ));
                 }
             })?;
             return Ok(out);
         }
 
-        let offsets = self.full_packet_offsets()?;
         let n = n.min(offsets.len().max(1));
         let segments = segment_ranges(&offsets, n);
-        let (predicate, this) = (&predicate, self);
+        let (predicate, this, keyframe_ticks) = (&predicate, self, &keyframe_ticks);
         let parts: Vec<Vec<PlayerState>> = std::thread::scope(|s| {
             let handles: Vec<_> = segments
                 .iter()
@@ -2546,10 +2568,16 @@ impl Parser {
                     s.spawn(move || -> Result<Vec<PlayerState>> {
                         let mut out = Vec::new();
                         let mut keys: Option<SnapshotKeys> = None;
+                        let mut identity_cache = HashMap::new();
                         this.decode_segment(seg_start, seg_end, filter, |ctx| {
                             if predicate(ctx.tick()) {
                                 let keys = keys.get_or_insert_with(|| SnapshotKeys::resolve(ctx));
-                                out.extend(Self::player_states(ctx, keys));
+                                out.extend(Self::player_states(
+                                    ctx,
+                                    keys,
+                                    keyframe_ticks,
+                                    &mut identity_cache,
+                                ));
                             }
                         })?;
                         Ok(out)
@@ -2651,8 +2679,41 @@ impl Parser {
 
     /// Read every active player pawn's state out of a parsed context, using
     /// field keys resolved once (see [`SnapshotKeys`]) rather than per tick.
-    fn player_states(ctx: &Context, keys: &SnapshotKeys) -> Vec<PlayerState> {
+    ///
+    /// `identity_cache` carries a pawn's last-known `(steamid, name)` across
+    /// calls, keyed by `(pawn.index, pawn.serial, keyframe_bucket)`. It exists
+    /// because CS2 explicitly clears a pawn's `m_hController` back-link once
+    /// the controller hands off to a fresh observer pawn (on death) — the
+    /// corpse keeps its position/team/health, just not the link back to who
+    /// it was. The cache is filled whenever the live link resolves and falls
+    /// back to it once the link goes invalid, so many dead-player rows keep
+    /// their identity instead of going null — not all of them, since the
+    /// cache resets every keyframe (see below); still a large improvement
+    /// over never resolving a dead pawn's identity at all.
+    ///
+    /// `(pawn.index, pawn.serial)` is the same uniqueness contract `Entity`
+    /// itself uses to tell a live pawn apart from a later, unrelated one that
+    /// reuses the same index. `keyframe_bucket` (the most recent tick in
+    /// `keyframe_ticks` at or before `ctx.tick()`) additionally scopes the
+    /// cache to "since the last full-packet keyframe" — a boundary intrinsic
+    /// to the demo, not to how many segments it happens to be decoded in —
+    /// so `collect_states`' parallel/serial equivalence guarantee holds: a
+    /// cache built across a whole serial pass would otherwise resolve more
+    /// than N independent per-segment caches ever could.
+    fn player_states(
+        ctx: &Context,
+        keys: &SnapshotKeys,
+        keyframe_ticks: &[i32],
+        identity_cache: &mut HashMap<(i32, u32, i32), (Option<u64>, Option<String>)>,
+    ) -> Vec<PlayerState> {
         let (pk, ck) = (&keys.pawn, &keys.ctrl);
+        // The latest keyframe at or before this tick (`i32::MIN` if this tick
+        // precedes every known keyframe -- shouldn't happen in practice, but
+        // degrades safely: that bucket just never collides with a real one).
+        let bucket = match keyframe_ticks.partition_point(|&t| t <= ctx.tick()) {
+            0 => i32::MIN,
+            i => keyframe_ticks[i - 1],
+        };
         let mut out = Vec::new();
         for (_, pawn) in ctx.entities().iter() {
             if !pawn.active || pawn.class_id != keys.pawn_class {
@@ -2711,6 +2772,7 @@ impl Parser {
                 continue;
             }
             state.side = Some(team_name(team));
+            let pawn_key = (pawn.index, pawn.serial, bucket);
             if let Some(ctrl) = pawn
                 .get_handle(pk.controller)
                 .and_then(|h| ctx.entities().get_by_handle(h))
@@ -2719,6 +2781,16 @@ impl Parser {
                 state.name = ctrl.get_string(ck.name);
                 state.money = ctrl.get_i64(ck.money) as i32;
                 state.ping = ctrl.get_u64(keys.ping).map(|p| p as i32);
+                if state.steamid.is_some() {
+                    identity_cache.insert(pawn_key, (state.steamid, state.name.clone()));
+                }
+            } else if let Some((steamid, name)) = identity_cache.get(&pawn_key) {
+                // Controller link is gone -- almost always a dead pawn (see
+                // above). `money`/`ping` are live controller state with no
+                // meaningful "last known" value once dead, so those stay
+                // unset rather than being backfilled from the cache.
+                state.steamid = *steamid;
+                state.name = name.clone();
             }
             out.push(state);
         }
