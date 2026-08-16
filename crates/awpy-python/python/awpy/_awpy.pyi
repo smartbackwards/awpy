@@ -264,9 +264,13 @@ class Demo:
         ``"counter-terrorist"`` / ``None`` for technical), ``type``
         (``"tactical"`` / ``"technical"``), ``start_tick``, ``end_tick``
         (``None`` if still active when the demo ends), ``remaining_at_start``
-        (nominal length in seconds; ``None`` for technical), and
-        ``round_num``. Cross-check against :attr:`rounds`' ``extended_freeze``
-        column.
+        (the countdown value read at the timeout's start, i.e. its nominal
+        length in seconds; ``None`` for technical, since no countdown is
+        networked for a game pause), ``duration_seconds`` (how long the
+        timeout actually ran, ``(end_tick - start_tick) / tick_rate``;
+        populated for technical timeouts too, unlike ``remaining_at_start``;
+        ``None`` while ``end_tick`` is), and ``round_num``. Cross-check
+        against :attr:`rounds`' ``extended_freeze`` column.
         """
 
     @property

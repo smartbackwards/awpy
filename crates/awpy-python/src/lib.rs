@@ -1920,6 +1920,7 @@ fn timeouts_to_frame(timeouts: &[Timeout]) -> PolarsResult<DataFrame> {
         col!("start_tick", timeouts, |t| t.start_tick),
         col!("end_tick", timeouts, |t| t.end_tick),
         col!("remaining_at_start", timeouts, |t| t.remaining_at_start),
+        col!("duration_seconds", timeouts, |t| t.duration_seconds),
         col!("round_num", timeouts, |t| t.round_num),
     ])
 }

@@ -261,8 +261,22 @@ pub struct Timeout {
     pub end_tick: Option<i32>,
     /// The countdown value read at the timeout's start — its nominal length
     /// in seconds. `None` for technical timeouts (no countdown is networked
-    /// for `m_bGamePaused`).
+    /// for `m_bGamePaused`). For a tactical timeout this is (confirmed
+    /// empirically against real matches, exactly, to the tick) the same
+    /// value as `duration_seconds` below -- it's read before any of the
+    /// countdown has elapsed, so the "remaining" value at that instant *is*
+    /// the full length. Kept as its own field since it's the server's own
+    /// value, not a derived one, and because a timeout still active when the
+    /// demo ends has a `remaining_at_start` but no `duration_seconds`.
     pub remaining_at_start: Option<f32>,
+    /// How long the timeout actually ran, `(end_tick - start_tick) /
+    /// tickrate`. Unlike `remaining_at_start`, this is populated for
+    /// technical timeouts too (an admin pause has no networked nominal
+    /// length, only an observed one) -- the field to reach for when "how
+    /// long was this timeout" needs a single answer regardless of kind.
+    /// `None` while `end_tick` is (the timeout was still active when the
+    /// demo ended).
+    pub duration_seconds: Option<f32>,
     /// 1-indexed number of the round in progress when the timeout started
     /// (mirrors [`Round::round_num`] — the round that will complete next).
     pub round_num: i32,
@@ -1727,6 +1741,7 @@ impl Parser {
     /// competitive-ruleset team timeout).
     pub fn timeouts(&self) -> Result<Vec<Timeout>> {
         let filter: HashSet<&str> = HashSet::from([GAME_RULES_CLASS]);
+        let tickrate = self.tickrate();
 
         let mut out: Vec<Timeout> = Vec::new();
         let mut keys: Option<TimeoutKeys> = None;
@@ -1773,6 +1788,7 @@ impl Parser {
                     start_tick: start,
                     end_tick: Some(ctx.tick()),
                     remaining_at_start: Some(remaining),
+                    duration_seconds: Some((ctx.tick() - start) as f32 / tickrate),
                     round_num,
                 });
             }
@@ -1789,6 +1805,7 @@ impl Parser {
                     start_tick: start,
                     end_tick: Some(ctx.tick()),
                     remaining_at_start: Some(remaining),
+                    duration_seconds: Some((ctx.tick() - start) as f32 / tickrate),
                     round_num,
                 });
             }
@@ -1805,6 +1822,7 @@ impl Parser {
                     start_tick: start,
                     end_tick: Some(ctx.tick()),
                     remaining_at_start: None,
+                    duration_seconds: Some((ctx.tick() - start) as f32 / tickrate),
                     round_num,
                 });
             }
@@ -1822,6 +1840,7 @@ impl Parser {
                 start_tick: start,
                 end_tick: None,
                 remaining_at_start: Some(remaining),
+                duration_seconds: None,
                 round_num,
             });
         }
@@ -1832,6 +1851,7 @@ impl Parser {
                 start_tick: start,
                 end_tick: None,
                 remaining_at_start: Some(remaining),
+                duration_seconds: None,
                 round_num,
             });
         }
@@ -1842,6 +1862,7 @@ impl Parser {
                 start_tick: start,
                 end_tick: None,
                 remaining_at_start: None,
+                duration_seconds: None,
                 round_num,
             });
         }

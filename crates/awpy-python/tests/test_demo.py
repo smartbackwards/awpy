@@ -516,6 +516,7 @@ def test_timeouts(demo_path: Path) -> None:
         "start_tick",
         "end_tick",
         "remaining_at_start",
+        "duration_seconds",
         "round_num",
     } <= set(timeouts.columns)
     assert set(timeouts["type"].unique()) <= {"tactical", "technical"}
@@ -526,6 +527,24 @@ def test_timeouts(demo_path: Path) -> None:
         closed = timeouts.filter(pl.col("end_tick").is_not_null())
         if closed.height:
             assert (closed["end_tick"] >= closed["start_tick"]).all()
+        # duration_seconds is populated exactly when end_tick is, and matches
+        # (end_tick - start_tick) / tick_rate for every kind (unlike
+        # remaining_at_start, which is null for technical timeouts).
+        assert (timeouts["duration_seconds"].is_null() == timeouts["end_tick"].is_null()).all()
+        if closed.height:
+            expected = (closed["end_tick"] - closed["start_tick"]) / demo.tick_rate
+            assert closed["duration_seconds"].to_numpy() == pytest.approx(
+                expected.to_numpy(), abs=1e-3
+            )
+        # For a tactical timeout, duration_seconds and remaining_at_start
+        # agree exactly -- remaining_at_start is read before any of the
+        # countdown has elapsed, so "remaining" at that instant is the full
+        # length.
+        closed_tactical = closed.filter(pl.col("type") == "tactical")
+        if closed_tactical.height:
+            assert closed_tactical["duration_seconds"].to_numpy() == pytest.approx(
+                closed_tactical["remaining_at_start"].to_numpy(), abs=1e-3
+            )
         # Cross-check: every tactical timeout lands inside a round flagged
         # extended_freeze (the two detection mechanisms should agree).
         extended = set(demo.rounds.filter(pl.col("extended_freeze"))["round_num"].to_list())

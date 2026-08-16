@@ -24,6 +24,19 @@ events:
   (the countdown, in seconds — CS2's tactical timeout is 30s).
 - Technical: `m_bGamePaused` (a single, non-team-specific boolean).
 
+`remaining_at_start` (the countdown value read the instant the timeout opens)
+only exists for tactical timeouts — no countdown is networked for
+`m_bGamePaused`, so a technical timeout has no nominal length to read. Every
+timeout, of either kind, does have a `duration_seconds` column instead:
+`(end_tick - start_tick) / tickrate`, the *observed* length rather than a
+networked one. For a tactical timeout the two agree exactly — confirmed
+against seven real timeouts in one match, all `remaining_at_start ==
+duration_seconds == 30.984375` — since `remaining_at_start` is read before any
+of the countdown has elapsed, so "remaining" at that instant already *is* the
+full length. `duration_seconds` is the field to reach for when the question is
+just "how long was this timeout," regardless of kind; `remaining_at_start`
+stays around because it's the server's own value, not a derived one.
+
 `Parser::timeouts` (`crates/awpy/src/datasets.rs`) watches these fields the
 same way `rounds()` watches `m_bFreezePeriod` — a rising edge opens a timeout,
 a falling edge closes it, and the round in progress is read from

@@ -354,6 +354,7 @@ the same entity-transition approach as [`rounds`](#rounds), independent of it.
 | `start_tick` | i32 | Tick the timeout began. |
 | `end_tick` | i32? | Tick it ended; null if still active when the demo ends. |
 | `remaining_at_start` | f32? | The countdown value at the timeout's start — its nominal length in seconds. Null for technical (no countdown is networked for a game pause). |
+| `duration_seconds` | f32? | How long the timeout actually ran, `(end_tick - start_tick) / tickrate`. Populated for technical timeouts too (unlike `remaining_at_start`, which has no networked value there). Null while `end_tick` is (the timeout was still active when the demo ended). For a tactical timeout this matches `remaining_at_start` exactly — it's the field to reach for when you need "how long was this timeout" for both kinds with one column. |
 | `round_num` | i32 | The round in progress when the timeout started. |
 
 Tactical timeouts (`m_bTerroristTimeOutActive` / `m_bCTTimeOutActive`) are
